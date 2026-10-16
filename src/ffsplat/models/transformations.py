@@ -1522,6 +1522,6 @@ def get_dynamic_params(params: dict[str, dict[str, Any]], input_field: list | st
         and params[transform_type]["method"] == "plas"
         and "weights" not in params[transform_type]
     ):
-        params[transform_type]["weights"] = dict.fromkeys(input_field, 1.0)
+        params[transform_type]["weights"] = {k: 1.0 for k in input_field}
 
     return transformation.get_dynamic_params(params[transform_type])
