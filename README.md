@@ -99,7 +99,7 @@ What changed for this:
 | `ffsplat convert --output-format 3DGS-INRIA-ply` | works on both |
 | round-trip `PLY -> SOG-web -> PLY` | works on both; geometry and all attribute multisets within the codec's quantisation budget |
 | `ffsplat view` | works; renders in the browser at `localhost:8080` |
-| `ffsplat live` | render path works |
+| `ffsplat live` | works; renders in the browser at `localhost:8080`, and the viewer's own **Convert** button runs a full conversion (encode -> container -> decode -> new scene) on MPS |
 | `ffsplat eval` | works, including `torchmetrics` SSIM and LPIPS (VGG16) **on MPS** — no CPU fallback needed |
 | `make test` (`pytest --doctest-modules`) | 13 passed |
 | `mypy`, `deptry`, `ruff check`, `ruff format --check` | clean for every file this branch touches |
@@ -168,8 +168,11 @@ builds viser's browser client (~45 s, once).
   intermediate carriers while splitting a value into bytes, so they are substituted with `int32`/`int64`
   (`ffsplat.device.encoding_dtype`) — byte-identical output, but it is a backend limitation worth knowing.
 - MPS is slower than CPU for PLAS at the grid sizes above.
-- `ffsplat live`'s "Convert" GUI buttons and its interactive eval tab were not exercised through the GUI;
-  the underlying calls are the same ones `convert`/`eval` use and those are verified.
+- `ffsplat live`'s **Convert** button was exercised through the GUI and completes on MPS, but only on a small
+  scene: on the full truck model with the GUI's default `SOG-PlayCanvas` profile it was still encoding (Metal
+  GPU at 94-100%) when a ~30 min best-effort budget expired, so it was stopped. The `live preview` checkbox
+  and the live viewer's Evaluation tab were not driven through the GUI; the calls behind them are the same
+  `convert`/`eval` paths verified from the CLI.
 - viser's initial camera is not set by ffsplat, so a freshly opened viewer is framed arbitrarily — that is
   upstream behaviour, not MPS-specific.
 

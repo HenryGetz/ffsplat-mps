@@ -863,3 +863,176 @@ See §2.4 for the full 12-hit listing. Summary: 7 of the 12 hits are comments/do
 availability guard itself (`torch.cuda.is_available()`), and exactly one is an actionable call
 (`torch.cuda.synchronize()` inside `elif device.type == "cuda"`, therefore unreachable on MPS).
 Runtime confirmation (no trapping, real MPS run) is in §3.1.
+
+---
+
+## Stage 2 follow-up — `ffsplat live` as a REAL process (closing the last gap)
+
+The director flagged that `ffsplat live` had only been exercised through its `render_fn`, never launched as
+a process. Closed here.
+
+### 2.12 Launching the real entry point
+
+```
+$ .venv/bin/ffsplat live --input /Users/henrygetz/Downloads/ffsplat-fixtures/raw/truck/point_cloud.ply \
+      --input-format 3DGS-INRIA.ply --results-path /tmp/live_results
+(viser) No client build found. Building now...
+ * Install prebuilt node (20.4.0) ... done.
+yarn install v1.22.22 ... ✨  Done in 9.07s.
+vite v5.4.11 building for production... ✓ built in 10.05s
+╭──────────────── viser ────────────────╮
+│             ╷                         │
+│   HTTP      │ http://localhost:8080   │
+│   Websocket │ ws://localhost:8080     │
+│             ╵                         │
+╰───────────────────────────────────────╯
+Loading scene 0...
+Viewer running... Ctrl+C to exit.
+```
+
+(The `opening handshake failed` / `websockets.exceptions.InvalidMessage: did not receive a valid HTTP
+request` traceback that follows is a transient TCP health probe hitting the websocket port, identical to
+what `ffsplat view` produced; the viewer then runs normally. It is also what the viewer's own "Stdout Logs"
+panel mirrors, because `live.py` wraps `sys.stdout`/`sys.stderr` with `_GuiStdout`, which still forwards to
+the real streams.)
+
+### 2.13 Browser drives the real live viewer
+
+Managed Chromium at `http://127.0.0.1:8080`, WebGL2 available. The page reports
+`Connected Showing scene: 0 Rendering Max Img Res 64 2048 Render Format:` and exposes the full Convert GUI:
+
+```
+buttons: ["Export Canvas", "Reset View", "Scenes", "Convert", "Load scene", "Save scene",
+          "Save encoding parameters", "Convert"]
+labels:  ["Server", "Max Img Res", "Render Format:", "store at:", "Output format", "live preview",
+          "method", "method", "method", "method", "scaling_fn", "shuffle", "improvement_break",
+          "means", "sh0", "shN", "opacities", "scales", "quaternions", "n bits" x5,
+          "#clusters", "distance", "n bits", "method", "shN_labels", "shN_centroids", "n bits",
+          "image_codec", "exact", "lossless", "quality", ...]
+```
+
+Screenshot: `live_mps_browser.png` (1600x1125, mean pixel 0.6930, non-black 0.9935).
+
+### 2.14 The GUI's own "Convert" button, pressed on MPS
+
+The Scenes tab was active first, so the Convert tab was clicked to reveal its button (initially
+`w=0,h=0,visible=false`, then `w=615` at x=1158,y=537), which was then clicked with a real trusted event.
+
+The viewer's own "Stdout Logs" mirror confirms the GUI callback fired:
+
+```
+$ (viewer stdout mirror)  ... websockets.exceptions.InvalidMessage: did not receive a valid HTTP request
+                          Converting scene...
+```
+
+`Converting scene...` is the first line of `Runner._convert`. Corroborating state, all read from the live
+GUI: the Convert button flipped to `disabled: true` (`disable_convert_ui()`), and the encoder's output
+directory appeared:
+
+```
+$ echo $TMPDIR
+/var/folders/3z/2289_9cn5yz7_cc_ql4t80ph0000gn/T/
+$ ls -la $TMPDIR/tmpf_7z9elq
+drwx------  gaussians1          # live.py's class-level tempfile.TemporaryDirectory()
+```
+
+`ps -o time` reports ~0 CPU seconds for the process, which initially looked like a hang; `sample 23208 6`
+resolved it — 3464 of 3487 samples are on thread `DispatchQueue_74: metal gpu stream`, with
+`com.apple.MPS.MPSLibrary.preheat` and `MTLCompilerConnectionQueue` active, i.e. the GUI conversion is
+genuinely executing on the Metal/MPS path (and JIT-preheating MPS kernels), rather than blocking. Wall
+clock and CPU-time accounting simply diverge because the work is inside GPU waits.
+
+GPU utilisation while that conversion ran (independent of `ps`, which cannot see GPU-bound time):
+
+```
+$ ioreg -r -d 1 -w 0 -c IOAccelerator | grep -o '"Device Utilization %"=[0-9]*'
+"Device Utilization %"=94
+```
+
+The encode writes nothing until its trailing `write_file` ops, so an empty `gaussians1/` plus ~94% GPU
+utilisation is exactly the shape of a normal in-progress full-size SOG encode (the equivalent CLI run took
+425-664 s of encode). In-progress screenshot: `live_mps_convert_inprogress.png`.
+
+### 2.15 Progress inside the GUI conversion (read from the viewer's own stdout mirror)
+
+The GUI conversion is the full-size SOG encode, so it runs for minutes; the viewer's "Stdout Logs" panel is
+the only view of it (we did not pass `--verbose`, so there are no per-operation lines, but the k-means
+reports itself):
+
+```
+$ (viewer stdout mirror, ~20 min in)
+k-means: iteration 6/10 done  k-means: iteration 7/10 done  k-means: iteration 8/10 done
+k-means: iteration 9/10 done  k-means: iteration 10/10 done
+```
+
+That is `ffsplat.models.clustering.KMeans` — the module written for this port — executing inside the GUI
+callback on MPS, i.e. the GUI conversion path genuinely runs the ported code.
+
+
+### 2.16 The GUI conversion path, run to COMPLETION on MPS
+
+Step 2.14 above (full-size truck, SOG-PlayCanvas default profile) was still encoding when the ~30 min
+best-effort budget ran out, so the same GUI path was then driven to completion on the small real-truck scene
+(`ffsplat-fixtures/raw/truck_tiny202.ply`, 202² = 40,804 primitives, a random subsample of the same
+pre-trained INRIA truck model; chosen only because a full-size SOG-PlayCanvas encode through the GUI did not
+finish in budget):
+
+```
+$ .venv/bin/ffsplat live --input .../raw/truck_tiny202.ply --input-format 3DGS-INRIA.ply --results-path /tmp/live_results
+Loading scene 0...
+Viewer running... Ctrl+C to exit.
+```
+
+The browser first switched the "Output format" dropdown from its default `SOG-PlayCanvas` to the validated
+`SOG-web` (verified by reading the Mantine Select's input value back: `before: "SOG-PlayCanvas"` →
+`after: "SOG-web"`), then pressed the Convert button. The viewer's own stdout mirror:
+
+```
+$ (viewer stdout mirror)
+k-means: iteration 8/10 done  k-means: iteration 9/10 done  k-means: iteration 10/10 done
+k-means: done - 39693 non-empty clusters of 40804
+Loading scene 1...
+```
+
+and the header changed from `Showing scene: 0` to `Showing scene: 1`, with the Convert button re-enabled
+(`disabled: false`) — i.e. `Runner.run_conversion` finished, `add_scene` added the converted scene and
+`load_scene` decoded it again and re-rendered. The encoder's output was written:
+
+```
+$ ls -la $TMPDIR/tmpbuqnc62e/gaussians1
+container_meta.yaml   4903 B
+f_dc.avif            94340 B
+f_rest_centroids.avif  553341 B
+f_rest_labels_bytes_0.avif  59361 B
+f_rest_labels_bytes_1.avif  59510 B
+means_bytes_0.avif   132553 B
+means_bytes_1.avif    69790 B
+opacities.avif        32602 B
+quaternions.avif      96336 B
+scales.avif           74607 B
+1.2M total
+$ head -6 container_meta.yaml
+container_identifier: smurfx
+container_version: '0.1'
+packer: ffsplat-0.1
+profile: SOG-web
+profile_version: 0.1
+```
+
+That is the same file set the CLI produces for `SOG-web` (`/tmp/rt_cpu_tiny/sog`), so the GUI's Convert
+button runs the identical, verified encoder — including this port's pure-PyTorch `KMeans` — on MPS.
+
+### 2.17 Honest summary of what was and was not driven through the GUI
+
+| GUI element | driven? | outcome |
+|---|---|---|
+| `ffsplat live` as a real process | yes | started, served `localhost:8080`, `Loading scene 0...` |
+| viewer renders the real PLY on MPS | yes | `Connected` / `Rendering`, screenshot `live_mps_browser.png` |
+| Convert tab + Convert button, full-size truck, default `SOG-PlayCanvas` | yes (clicked with a real trusted event) | callback fired (`Converting scene...`), encoder dir created, 94-100% GPU on `metal gpu stream`, this port's k-means printed up to `iteration 10/10 done`; **not completed within the ~30 min budget** (SOG-PlayCanvas on 2.54M primitives), so **no** container was written and the process was stopped |
+| Convert button, 40,804-primitive truck scene, `SOG-web` | yes | **completed**: container written, scene decoded, `Showing scene: 1` |
+| `live preview` checkbox | no | not driven |
+| live viewer's Evaluation tab | no | not driven (the eval CLI path is verified separately in §2.9/§2.11) |
+
+Artifacts: `live_mps_browser.png`, `live_mps_convert.png` (full-size, still encoding),
+`live_mps_convert_inprogress.png`, `live_mps_convert_completed_tiny.png` (completed).
+The live server processes were stopped afterwards; port 8080 is free.

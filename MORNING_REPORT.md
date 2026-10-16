@@ -29,7 +29,7 @@ Artifacts: `gate_mpsplat_render.png`, `gate_mpsplat_render_vs_gt.png`.
 |---|---|---|---|
 | 1 | clean-clone `uv sync`, **no** CUDA packages | **DONE** | `uv pip list` has **0** matches for `cupy|nvidia|cuda`; only `torch`-metadata `Requires-Dist: nvidia-*-cu12 ; platform_system == "Linux"` markers remain, which cannot apply on macOS. Verified again in a *fresh clone* (`ffsplat-clean`) where `uv sync` takes 2.5 s. |
 | 2 | convert round-trip cpu **and** mps, float32 | **DONE** | full-size truck: 2,541,226 → 2,540,836 primitives (SOG-web prunes to `floor(sqrt(N))²`), 630,225,580 B PLY → 32,984,494 B (cpu) / 32,994,991 B (mps) container; float32 in/out asserted; bbox relative error 1.7e-05; every one of the 59 PLY properties inside its codec-derived tolerance (**0 failures on both devices**), with numerically identical error statistics across devices. cpu 863.6 s encode / 6.3 s decode; **mps 663.8 s encode / 5.8 s decode**. See PROGRESS.md §1.8 and §Stage 3. |
-| 3 | live / view / eval render the real PLY on MPS + PNGs | **DONE** | `view_mps.png`, `live_mps.png` (978x545, mean pixel 0.491, non-black 100%), `view_mps_browser.png` (real `ffsplat view` CLI driven by a browser: 1600x1125, mean 0.609, viewer reports `Connected Rendering`), `eval_mps.png`. |
+| 3 | live / view / eval render the real PLY on MPS + PNGs | **DONE** | `view_mps.png`, `live_mps.png` (978x545, mean pixel 0.491, non-black 100%), `view_mps_browser.png` (real `ffsplat view` CLI driven by a browser: 1600x1125, mean 0.609, viewer reports `Connected Rendering`), `eval_mps.png`. **`live` was additionally launched as a real process** (entry point, not an import) and driven by a browser: `live_mps_browser.png` (1600x1125, mean pixel 0.693, viewer reports `Showing scene: 0` / `Rendering`), and its GUI **Convert** button runs to completion on MPS — `live_mps_convert_completed_tiny.png` records `SOG-web` container written + `Showing scene: 1`, while `live_mps_convert.png` / `live_mps_convert_inprogress.png` record the full-size attempt still encoding when the ~30 min budget expired. |
 | 4 | full upstream test suite, failures explained | **DONE** | `pytest --doctest-modules` → **13 passed** (2 upstream + 11 added). Zero failures. `mypy` clean, `deptry` clean, `ruff check`/`ruff format --check` clean for every file this branch creates or edits; the 5 remaining ruff findings and 3 format complaints are **pre-existing upstream**, proven by `git diff --quiet 3fb6444` on the files and lines that carry them. |
 | 5 | no reachable CUDA runtime path on MPS | **DONE** | `grep -rn cuda src/ffsplat/` → 12 hits, all comments/docstrings except `torch.cuda.is_available()` (the availability predicate itself) and one `torch.cuda.synchronize()` inside an `elif device.type == "cuda"` branch. Proven at runtime: with 14 `torch.cuda.*` entry points trapped to raise, an MPS run of device resolution + PLY decode + `view.render_fn` + `eval.rasterize_splats` reported **0 trapped calls**. |
 | 6 | fork README: Apple Silicon section + measured timings | **DONE** | `README.md` §"Apple Silicon (MPS) support": install, what works/doesn't, and M1 Max timings in seconds (raster call 5.73 s cold / 1.72 s warm; PLAS 5.1/21.6/50.4 s cpu vs 29.8/64.3/129.0 s mps; full-size encode 663.8 s mps / 863.6 s cpu). |
@@ -110,8 +110,13 @@ sha256 in PROGRESS.md §0.3). The `eval` command needs them.
   encode is therefore faster with `--device cpu`.
 - **`torch` had to be bumped** from the pinned `2.6.0` to `2.14.1`: the vendored MPS rasterizer needs
   `torch.mps.compile_shader`, absent in 2.6.0. Stage-1 convert was validated on 2.6.0 first.
-- **`ffsplat live`'s GUI buttons** (Convert / live preview / the eval tab) were not driven through the GUI.
-  The functions behind them are the same `convert`/`eval` code paths that are verified from the CLI.
+- **`ffsplat live` was launched as a real process and its Convert button was driven through the GUI**; the
+  GUI conversion **completes on MPS**, but only on the 40,804-primitive truck scene. On the full-size run
+  (2,541,226 primitives, the GUI's default `SOG-PlayCanvas` profile) the click fired and the encode was
+  executing on Metal at 94-100% GPU — this port's `KMeans` printed up to `iteration 10/10 done` — but it had
+  not finished when the ~30 min best-effort budget expired, so no container was written for it and the
+  process was stopped. `live`'s `live preview` checkbox and its Evaluation tab were **not** driven through
+  the GUI; the functions behind them are the same `convert`/`eval` code paths verified from the CLI.
 - **Only `SOG-web` encode and `smurfx → 3DGS-INRIA-ply` decode were validated.** The other profiles
   (`SOG-PlayCanvas`, `SOG-web-png`, `SOG-web-nosh`, `SOG-web-sh-split`, `3DGS-INRIA-nosh-ply`) still use
   the same code paths and the same pure-PyTorch k-means, but were **not** individually run.
@@ -138,6 +143,10 @@ sha256 in PROGRESS.md §0.3). The `eval` command needs them.
 | `view_mps.png` | `ffsplat view`'s own `render_fn` output on MPS, real COLMAP camera (978x545) |
 | `view_mps_browser.png` | browser screenshot of the real `ffsplat view` CLI running on MPS |
 | `live_mps.png` | `ffsplat live`'s `render_fn` output on MPS |
+| `live_mps_browser.png` | browser screenshot of the real `ffsplat live` CLI running on MPS (1600x1125) |
+| `live_mps_convert_inprogress.png` | that CLI's GUI **Convert** pressed: `Converting scene...`, button disabled, encoder dir created |
+| `live_mps_convert.png` | same, full-size truck, still encoding (`SOG-PlayCanvas`) when the budget expired |
+| `live_mps_convert_completed_tiny.png` | GUI **Convert completed** on MPS: `SOG-web` container written, `Showing scene: 1` |
 | `eval_mps.png` | `ffsplat eval`'s own `[ground-truth | render]` canvas (`eval_0000.png`) |
 | `vendor/mpsplat/VENDOR.md` | provenance of the vendored MPS rasterizer |
 
