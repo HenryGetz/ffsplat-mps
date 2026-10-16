@@ -163,7 +163,7 @@ def main():
 
     args = parser.parse_args()
 
-    gaussians = decode_gaussians(args.data_path, "smurfx").to(resolve_device())
+    gaussians = decode_gaussians(args.data_path, "smurfx", verbose=False).to(resolve_device())
 
     dataset_dir = args.dataset_path
 

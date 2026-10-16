@@ -115,6 +115,9 @@ testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py312"
+# vendor/ is a byte-for-byte copy of an upstream project (see vendor/mpsplat/VENDOR.md);
+# reformatting or linting it would break the pinned-copy guarantee.
+extend-exclude = ["vendor"]
 line-length = 120
 fix = true
 
@@ -168,6 +171,12 @@ ignore = [
 
 [tool.ruff.format]
 preview = true
+
+[tool.deptry]
+# Same reasoning as ruff.extend-exclude: the vendored upstream tree is not ours to lint.
+# (`extend_exclude`, not `exclude`: the latter would replace deptry's own defaults,
+# e.g. it would start scanning .venv.)
+extend_exclude = ["vendor"]
 
 [tool.deptry.per_rule_ignores]
 # torchvision is required for torchmetrics

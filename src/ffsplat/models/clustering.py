@@ -40,7 +40,8 @@ _MAX_SCORE_ELEMS = 1 << 25
 
 
 def _l2_normalize(x: Tensor, eps: float = 1e-12) -> Tensor:
-    return x / x.norm(dim=-1, keepdim=True).clamp_min(eps)
+    """Row-wise L2 normalisation, with ``eps`` flooring the norm."""
+    return torch.nn.functional.normalize(x, p=2, dim=-1, eps=eps)
 
 
 def _chunk_rows(n_clusters: int, max_rows: int = 8192) -> int:

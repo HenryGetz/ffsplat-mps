@@ -938,7 +938,7 @@ class PLAS:
         """
         improvement_break = float(plas_cfg.improvement_break)
         try:
-            _, sorted_indices_ret = sort_with_plas(grid_to_sort, improvement_break=improvement_break, verbose=verbose)
+            return PLAS._sort_on_device(grid_to_sort, improvement_break, verbose)
         except (RuntimeError, NotImplementedError) as exc:
             if grid_to_sort.device.type == "cpu":
                 raise
@@ -946,11 +946,13 @@ class PLAS:
                 f"[PLAS] sort_with_plas failed on device '{grid_to_sort.device.type}' "
                 f"({type(exc).__name__}: {exc}); retrying on CPU."
             )
-            _, sorted_indices_ret = sort_with_plas(
-                grid_to_sort.cpu(), improvement_break=improvement_break, verbose=verbose
-            )
-            sorted_indices_ret = sorted_indices_ret.to(grid_to_sort.device)
-        return sorted_indices_ret
+            return PLAS._sort_on_device(grid_to_sort.cpu(), improvement_break, verbose).to(grid_to_sort.device)
+
+    @staticmethod
+    def _sort_on_device(grid: Tensor, improvement_break: float, verbose: bool) -> Tensor:
+        """Run PLAS once on ``grid``'s own device. (``plas`` ships no type information.)"""
+        _, sorted_indices = sort_with_plas(grid, improvement_break=improvement_break, verbose=verbose)
+        return torch.as_tensor(sorted_indices)
 
     @staticmethod
     def get_dynamic_params(params: dict[str, Any]) -> list[dict[str, Any]]:
