@@ -726,3 +726,68 @@ ruff/ruff-format/prettier pre-commit hooks.
 silently rewritten `_renderer.py` and `get_dynamic_params`, which I reverted in commit `b807068`), and
 there is no value in reformatting unrelated upstream code tonight. `ruff check --no-fix`,
 `ruff format --check`, `mypy` and `deptry` — the tools `make check` delegates to — were all run as above.
+
+### 2.11 `ffsplat eval` on the full scene, from the container the MPS convert produced
+
+```
+$ .venv/bin/ffsplat eval --data-path /tmp/rt_mps_full_final/sog \
+      --dataset-path /Users/henrygetz/Downloads/ffsplat-fixtures/tandt_db/tandt/truck \
+      --results-path /tmp/eval_full
+[Parser] 251 images, taken by 251 cameras.
+Running evaluation...
+PSNR: 24.295, SSIM: 0.8461, LPIPS: 0.184 Time: 0.106s/image Number of GS: 2540836 Size: 31.466MB
+
+real	0m33.110s
+```
+
+That is the expected ballpark for the truck scene (the 3DGS paper reports ~25.2 dB), so the MPS render —
+including camorph's camera convention — genuinely reproduces the trained model. `eval_mps.png` is the
+eval loop's own `[ground-truth | render]` canvas from this run.
+
+---
+
+## Stage 3 — full-size MPS round-trip (final environment)
+
+```
+### device=mps input=raw/truck/point_cloud.ply
+encode 663.8s  decode 5.8s
+input : N=2541226 props=62 format=binary_little_endian bytes=630225580
+output: N=2540836 props=59 format=binary_little_endian bytes=599638774
+sog container bytes=32994991 files=[container_meta.yaml, f_dc.avif, f_rest_centroids.avif,
+   f_rest_labels_bytes_0.avif, f_rest_labels_bytes_1.avif, means_bytes_0.avif, means_bytes_1.avif,
+   opacities.avif, quaternions.avif, scales.avif]
+dropped props: ['nx', 'ny', 'nz']   extra props: []
+grid prune: N=2541226 -> floor(sqrt(N))^2=2540836 (dropped 390, SOG-web `prune_by: opacities`; output N=2540836)
+CHECK dtype: input float32 OK / output float32 OK
+  x/y/z      worst max-delta=0.004839 (tol 0.006186, 0.78x budget)
+  f_dc_*     worst max-delta=0.082205 (tol 0.193544, 0.42x budget)
+  rot_*      worst max-delta=0.032825 (tol 0.196958, 0.17x budget)
+  scale_*    worst max-delta=0.214432 (tol 1.286793, 0.17x budget)
+  opacity    worst max-delta=0.039440 (tol 0.047619, 0.83x budget)
+  f_rest_*(codebook) worst mean/range=0.0127 (tol <= 0.05)
+properties checked: 59; tolerance failures: 0
+CHECK bbox: max-abs-delta=0.002308 scene-extent=135.135 rel=1.71e-05 (tol 0.01)
+CHECK opacity(prob): mean_delta=0.000100 worst-q(0.01,0.5,0.99)_delta=0.002472 (tol 0.05)
+ "encode_s": 663.77, "decode_s": 5.84, "sog_bytes": 32994991
+ROUNDTRIP OK (mps)
+```
+
+**Every CHECK statistic is numerically identical to the CPU run** (x 0.002864, y 0.001131, z 0.004839,
+opacity 0.039440, scale_0 0.269486, f_dc_2 0.082205, f_rest_44 mean/range 0.008381, bbox rel 1.71e-05) —
+the MPS path is numerically equivalent to CPU, and the only difference is the container size
+(32,994,991 B vs 32,984,494 B) from PLAS's unseeded shuffling.
+
+**MPS is faster than CPU for the full encode**: 663.8 s vs 863.6 s.
+
+### 3.1 Runtime proof: no reachable CUDA path on MPS
+
+```
+$ .venv/bin/python /Users/henrygetz/Downloads/ffsplat-fixtures/no_cuda_path_check.py raw/truck_tiny202.ply
+resolve_device() -> mps | cuda.is_available() -> False
+decoded: 40804 gaussians on mps:0
+view.render_fn -> (256, 256, 3) mean 0.01976010389626026
+eval.rasterize_splats -> (1, 256, 256, 3) in 0.451s
+NO REACHABLE CUDA PATH ON MPS: OK (0 trapped torch.cuda calls)
+```
+
+(14 public `torch.cuda.*` entry points were replaced with traps that record and raise before the run.)

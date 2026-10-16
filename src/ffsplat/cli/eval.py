@@ -57,14 +57,14 @@ def eval_step(
     gaussians: Gaussians,
     white_background: bool,
     results_path: Path | None,
-    device: str,
+    device: torch.device,
     step: int,
     metrics: dict[str, list],
     psnr: callable,
     ssim: callable,
     lpips: callable,
     data: dict[str, Float[NDArray, "3 3"] | Float[NDArray, "4 4"] | Float[NDArray, "N M"] | int],
-) -> None:
+) -> float:
     camtoworlds = data["camtoworld"].to(device)
     Ks = data["K"].to(device)
     pixels = data["image"].to(device)

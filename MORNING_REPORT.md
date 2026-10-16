@@ -1,0 +1,148 @@
+# MORNING_REPORT — ffsplat on Apple Silicon (MPS)
+
+**Branch:** `apple-silicon` (forked to `https://github.com/HenryGetz/ffsplat`, never pushed upstream, never force-pushed)
+**Base commit:** `3fb6444c5faed6de9aa55fa2313df6c2a4104193` (upstream `w-m/ffsplat` HEAD, 2025-07-10)
+**Machine:** M1 Max MacBook Pro, 10 CPU cores, 32 GiB unified memory, macOS 27.0.0 (darwin), arm64 — everything below ran locally on this Mac.
+**Verdict:** all three stages completed. Port works end-to-end on MPS; the honest gaps are listed at the bottom.
+
+Full chronological evidence with verbatim command output: [`PROGRESS.md`](PROGRESS.md).
+
+---
+
+## 1. The gate (F1–F4) — PASSED
+
+| | result |
+|---|---|
+| **F1 fixtures** | real 3DGS PLY obtained: **INRIA `truck/point_cloud/iteration_30000`** (630,225,580 B, sha256 `65ecf405…`), range-extracted from INRIA's 14.6 GB `models.zip` (the server sends `Accept-Ranges: bytes`, so only the truck members were downloaded). Plus the real **Tanks&Temples COLMAP** set (`tandt_db.zip`, 251 truck images + `sparse/0`), plus HF `dylanebert/3dgs` bonsai as a second real PLY. |
+| **F2 machine** | `uname -m` → `arm64`; `torch.backends.mps.is_available()` → `True` (torch 2.14.1, Python 3.13.12). |
+| **F3 mpsplat gate** | `pytest` → **`35 passed, 28 skipped in 38.26s`**; real truck PLY rendered through mpsplat's `rasterization(...)` with ffsplat's exact kwargs (`radius_clip=3`, `render_mode="RGB"`, `backgrounds`, `sh_degree=3`, `@torch.no_grad()`) at 978x545 in 5.73 s cold / 1.72 s warm. |
+| **F3 render correctness** | **PSNR 20.43 dB** against the real ground-truth frame `000001.jpg`, per-channel correlation 0.91/0.92/0.93, luma correlation 0.915; an independent vision judge says `same_scene_clearly` / `a_3d_object_on_background` (p=1.0). |
+| **F4 decision** | **proceed to Stages 1–3** (pytest passes **and** the render visibly depicts the scene). No fallback adapter was needed; no other backend was substituted. |
+
+Artifacts: `gate_mpsplat_render.png`, `gate_mpsplat_render_vs_gt.png`.
+
+---
+
+## 2. Status against the seven done-criteria
+
+| # | criterion | status | evidence |
+|---|---|---|---|
+| 1 | clean-clone `uv sync`, **no** CUDA packages | **DONE** | `uv pip list` has **0** matches for `cupy|nvidia|cuda`; only `torch`-metadata `Requires-Dist: nvidia-*-cu12 ; platform_system == "Linux"` markers remain, which cannot apply on macOS. Verified again in a *fresh clone* (`ffsplat-clean`) where `uv sync` takes 2.5 s. |
+| 2 | convert round-trip cpu **and** mps, float32 | **DONE** | full-size truck: 2,541,226 → 2,540,836 primitives (SOG-web prunes to `floor(sqrt(N))²`), 630,225,580 B PLY → 32,984,494 B (cpu) / 32,994,991 B (mps) container; float32 in/out asserted; bbox relative error 1.7e-05; every one of the 59 PLY properties inside its codec-derived tolerance (**0 failures on both devices**), with numerically identical error statistics across devices. cpu 863.6 s encode / 6.3 s decode; **mps 663.8 s encode / 5.8 s decode**. See PROGRESS.md §1.8 and §Stage 3. |
+| 3 | live / view / eval render the real PLY on MPS + PNGs | **DONE** | `view_mps.png`, `live_mps.png` (978x545, mean pixel 0.491, non-black 100%), `view_mps_browser.png` (real `ffsplat view` CLI driven by a browser: 1600x1125, mean 0.609, viewer reports `Connected Rendering`), `eval_mps.png`. |
+| 4 | full upstream test suite, failures explained | **DONE** | `pytest --doctest-modules` → **13 passed** (2 upstream + 11 added). Zero failures. `mypy` clean, `deptry` clean, `ruff check`/`ruff format --check` clean for every file this branch creates or edits; the 5 remaining ruff findings and 3 format complaints are **pre-existing upstream**, proven by `git diff --quiet 3fb6444` on the files and lines that carry them. |
+| 5 | no reachable CUDA runtime path on MPS | **DONE** | `grep -rn cuda src/ffsplat/` → 12 hits, all comments/docstrings except `torch.cuda.is_available()` (the availability predicate itself) and one `torch.cuda.synchronize()` inside an `elif device.type == "cuda"` branch. Proven at runtime: with 14 `torch.cuda.*` entry points trapped to raise, an MPS run of device resolution + PLY decode + `view.render_fn` + `eval.rasterize_splats` reported **0 trapped calls**. |
+| 6 | fork README: Apple Silicon section + measured timings | **DONE** | `README.md` §"Apple Silicon (MPS) support": install, what works/doesn't, and M1 Max timings in seconds (raster call 5.73 s cold / 1.72 s warm; PLAS 5.1/21.6/50.4 s cpu vs 29.8/64.3/129.0 s mps; full-size encode 663.8 s mps / 863.6 s cpu). |
+| 7 | small commits, no force-push | **DONE** | 6 commits on `apple-silicon`, pushed to the fork only. |
+
+---
+
+## 3. Exact reproduce commands
+
+Everything below is a copy-paste of what was actually run on this Mac.
+
+```bash
+# ---- install (Apple Silicon, no CUDA toolkit) -------------------------------
+git clone https://github.com/HenryGetz/ffsplat.git && cd ffsplat
+git checkout apple-silicon
+uv sync
+
+# ---- sanity: MPS present, no CUDA packages ----------------------------------
+.venv/bin/python -c "import torch; print(torch.__version__, torch.backends.mps.is_available(), hasattr(torch.mps,'compile_shader'))"
+uv pip list --python .venv/bin/python | grep -iE "cupy|nvidia|cuda" || echo "NO CUDA PACKAGES"
+
+# ---- convert round-trip on MPS ----------------------------------------------
+PLY=/Users/henrygetz/Downloads/ffsplat-fixtures/raw/truck/point_cloud.ply
+.venv/bin/ffsplat convert --input $PLY --input-format 3DGS-INRIA.ply \
+    --output /tmp/sog --output-format SOG-web --device mps
+.venv/bin/ffsplat convert --input /tmp/sog --input-format smurfx \
+    --output /tmp/back --output-format 3DGS-INRIA-ply --device mps
+# (or: .venv/bin/python /Users/henrygetz/Downloads/ffsplat-fixtures/roundtrip_check.py mps $PLY mps_full_final)
+
+# ---- view (interactive; needs a browser at localhost:8080) ------------------
+.venv/bin/ffsplat view --input $PLY --input-format 3DGS-INRIA.ply
+
+# ---- live -------------------------------------------------------------------
+.venv/bin/ffsplat live --input $PLY --input-format 3DGS-INRIA.ply
+
+# ---- eval against the real COLMAP set ---------------------------------------
+.venv/bin/ffsplat eval --data-path /tmp/sog \
+    --dataset-path /Users/henrygetz/Downloads/ffsplat-fixtures/tandt_db/tandt/truck \
+    --results-path /tmp/evalout
+
+# ---- tests + gates ----------------------------------------------------------
+.venv/bin/python -m pytest --doctest-modules -q     # 13 passed
+.venv/bin/ruff check --no-fix . ; .venv/bin/ruff format --check .
+.venv/bin/mypy ; .venv/bin/deptry .
+uv lock --locked
+
+# ---- proof that no torch.cuda.* call happens on MPS -------------------------
+.venv/bin/python /Users/henrygetz/Downloads/ffsplat-fixtures/no_cuda_path_check.py \
+    /Users/henrygetz/Downloads/ffsplat-fixtures/raw/truck_tiny202.ply
+```
+
+Fixtures are **not** in the repo; they live in `/Users/henrygetz/Downloads/ffsplat-fixtures` (provenance and
+sha256 in PROGRESS.md §0.3). The `eval` command needs them.
+
+---
+
+## 4. Bugs found in upstream `ffsplat` (both blocking, both fixed here)
+
+1. **`ffsplat eval` could not start at all.** `cli/eval.py:166` called
+   `decode_gaussians(args.data_path, "smurfx")` while `scene_decoder.decode_gaussians` requires `verbose`
+   (`TypeError: decode_gaussians() missing 1 required positional argument: 'verbose'`). Present at base
+   commit `3fb6444`; fixed by passing `verbose=False`.
+2. **`ffsplat convert --output-format 3DGS-INRIA-ply` raised `ValueError: could not broadcast input array
+   from shape (N,1) into shape (N,)`.** `scene_decoder._create_scene` deliberately unsqueezes `opacities`
+   to `[N,1]` and the `to_field` op preserves that shape, but a PLY vertex property is a scalar.
+   Reproduced with an *identity* PLY→PLY conversion on untouched upstream files; fixed at the writer
+   boundary in `io/ply.py` (squeeze a trailing singleton, and raise a named error instead of an opaque
+   numpy one for genuinely multi-component fields). Regression tests in `tests/test_ply_io.py`.
+
+---
+
+## 5. Known MPS gaps / honesty section
+
+- **`uint16`/`uint32` are not representable on MPS.** The SOG codecs use them only as intermediate
+  carriers while splitting a value into bytes, so `ffsplat.device.encoding_dtype` substitutes
+  `int32`/`int64` on MPS only. Byte-identical output, but it is a backend limitation.
+- **MPS is slower than CPU for PLAS** at the SOG grid sizes (29.8 s vs 5.1 s at 256²); the full-size
+  encode is therefore faster with `--device cpu`.
+- **`torch` had to be bumped** from the pinned `2.6.0` to `2.14.1`: the vendored MPS rasterizer needs
+  `torch.mps.compile_shader`, absent in 2.6.0. Stage-1 convert was validated on 2.6.0 first.
+- **`ffsplat live`'s GUI buttons** (Convert / live preview / the eval tab) were not driven through the GUI.
+  The functions behind them are the same `convert`/`eval` code paths that are verified from the CLI.
+- **Only `SOG-web` encode and `smurfx → 3DGS-INRIA-ply` decode were validated.** The other profiles
+  (`SOG-PlayCanvas`, `SOG-web-png`, `SOG-web-nosh`, `SOG-web-sh-split`, `3DGS-INRIA-nosh-ply`) still use
+  the same code paths and the same pure-PyTorch k-means, but were **not** individually run.
+- **SOG output is not reproducible run-to-run** — upstream, not a port issue: ffsplat calls
+  `sort_with_plas` without a `seed`, and PLAS then consumes unseeded `np.random.randint` block shifts and
+  `torch.randperm`. Two identical CPU invocations produced different container bytes (PROGRESS.md §1.8).
+  Comparisons therefore have to be order-independent, which the validator is.
+- **`pre-commit run -a` was not run** — its `ruff --fix`/`prettier` hooks rewrite files (they silently
+  rewrote two unrelated upstream files, reverted in `b807068`). The tools `make check` delegates to
+  (`ruff --no-fix`, `ruff format --check`, `mypy`, `deptry`) were all run instead and are clean.
+- **The eval metrics** come from the container the MPS convert produced: `PSNR 24.295, SSIM 0.8461, LPIPS 0.184`, `0.106 s/image`, 2,540,836 Gaussians, 31.466 MB — i.e. the MPS render agrees with the real photographs (the 3DGS paper reports ~25.2 dB for truck).
+- `nvidia-ncore`, `imagecodecs` and the `viser` fork's other optional extras were not needed and are not
+  installed.
+
+---
+
+## 6. Evidence files at the repo root
+
+| file | what it is |
+|---|---|
+| `PROGRESS.md` | the full chronological record, verbatim command output at every stage boundary |
+| `gate_mpsplat_render.png` | F3 gate render of the real truck PLY via mpsplat `rasterization` on MPS (801,712 B) |
+| `gate_mpsplat_render_vs_gt.png` | same, stacked above the real ground-truth photo |
+| `view_mps.png` | `ffsplat view`'s own `render_fn` output on MPS, real COLMAP camera (978x545) |
+| `view_mps_browser.png` | browser screenshot of the real `ffsplat view` CLI running on MPS |
+| `live_mps.png` | `ffsplat live`'s `render_fn` output on MPS |
+| `eval_mps.png` | `ffsplat eval`'s own `[ground-truth | render]` canvas (`eval_0000.png`) |
+| `vendor/mpsplat/VENDOR.md` | provenance of the vendored MPS rasterizer |
+
+## 7. Commits on `apple-silicon`
+
+```
+@@COMMITS@@
+```
