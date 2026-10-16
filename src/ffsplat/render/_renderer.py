@@ -68,7 +68,7 @@ class Renderer(threading.Thread):
 
     def _define_transitions(self):
         transitions: dict[RenderState, dict[RenderAction, RenderState]] = {
-            s: {a: s for a in get_args(RenderAction)} for s in get_args(RenderState)
+            s: dict.fromkeys(get_args(RenderAction), s) for s in get_args(RenderState)
         }
         transitions["low_move"]["static"] = "low_static"
         transitions["low_static"]["static"] = "high"

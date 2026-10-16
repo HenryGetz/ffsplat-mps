@@ -938,9 +938,7 @@ class PLAS:
         """
         improvement_break = float(plas_cfg.improvement_break)
         try:
-            _, sorted_indices_ret = sort_with_plas(
-                grid_to_sort, improvement_break=improvement_break, verbose=verbose
-            )
+            _, sorted_indices_ret = sort_with_plas(grid_to_sort, improvement_break=improvement_break, verbose=verbose)
         except (RuntimeError, NotImplementedError) as exc:
             if grid_to_sort.device.type == "cpu":
                 raise
@@ -1524,6 +1522,6 @@ def get_dynamic_params(params: dict[str, dict[str, Any]], input_field: list | st
         and params[transform_type]["method"] == "plas"
         and "weights" not in params[transform_type]
     ):
-        params[transform_type]["weights"] = {k: 1.0 for k in input_field}
+        params[transform_type]["weights"] = dict.fromkeys(input_field, 1.0)
 
     return transformation.get_dynamic_params(params[transform_type])

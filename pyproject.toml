@@ -15,8 +15,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "gsplat==1.4.0",
-    "torch==2.6.0",
+    # Apple-Silicon (MPS/Metal) port of gsplat; vendored (see vendor/mpsplat/VENDOR.md).
+    # It ships the upstream top-level package name, so `import gsplat` still works.
+    "mpsplat==1.5.3",
+    # Bumped from 2.6.0: the vendored mpsplat Metal kernels need
+    # `torch.mps.compile_shader`, which did not exist in 2.6.0 (see PROGRESS.md).
+    "torch==2.14.1",
     "jaxtyping>=0.2.25,<0.3.0",
     "numpy>=2.0.0,<3.0.0",
     "plyfile>=1.1.0,<2.0.0",
@@ -36,6 +40,12 @@ dependencies = [
     "plas @ git+https://github.com/fraunhoferhhi/PLAS.git@4f1109c94f29a5a6de62bdf8f20cb3ce1ff0e680",
     "viser @ git+https://github.com/w-m/viser.git@03b87b8c1521a0afe79d885e684f1cb0b3323294",
 ]
+
+[tool.uv.sources]
+# Wire the vendored MPS port in as the `gsplat` provider. Editable so the 14
+# .metal shader sources are read from vendor/mpsplat (upstream MANIFEST.in does not
+# list them, so a built wheel could omit them).
+mpsplat = { path = "vendor/mpsplat", editable = true }
 
 [tool.uv]
 # PLAS (github.com/fraunhoferhhi/PLAS) lists `lapjv` in install_requires, but its

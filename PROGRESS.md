@@ -470,3 +470,90 @@ $ .venv/bin/python -m pytest -q
 .............                                                            [100%]
 13 passed in 0.92s
 ```
+
+---
+
+## Stage 2 — LIVE / VIEW / EVAL
+
+### 2.1 Vendored MPS provider
+
+`vendor/mpsplat/` — byte-for-byte copy of `zacsmms/mpsplat` @
+`94c89496f99d74d81e2a298e1f6159cc3978af34` (2026-05-12), i.e. **the exact commit whose pytest
+(35 passed / 28 skipped) and metal gate render were verified in F3**. 912 KB, all 14
+`gsplat/mps/_shaders/*.metal` present, Apache-2.0 `LICENSE` retained.
+Provenance + what was/wasn't copied is in `vendor/mpsplat/VENDOR.md`; the hash is also repeated there.
+
+`pyproject.toml`:
+
+- `"gsplat==1.4.0"` → `"mpsplat==1.5.3"` (mpsplat renames only the *distribution*; the top-level
+  package is still `gsplat`, so every `from gsplat... import` in ffsplat is unchanged);
+- `[tool.uv.sources] mpsplat = { path = "vendor/mpsplat", editable = true }` — editable, because
+  upstream's `MANIFEST.in` does not list `gsplat/mps/_shaders/*.metal`, so a built wheel could
+  omit the 14 shader sources. No runtime dependence on the live upstream repo.
+
+### 2.2 Torch bump (recorded reason)
+
+`torch==2.6.0` was tried first and **works for Stage 1** (see 1.3). It had to be bumped for Stage 2:
+
+```
+$ .venv/bin/python -c "import torch; print(torch.__version__, hasattr(torch.mps,'compile_shader'))"
+2.6.0 False
+```
+
+The vendored mpsplat's Metal kernels are JIT-compiled by `torch.mps.compile_shader`
+(`gsplat/mps/__init__.py::is_metal_available()`), which does not exist in 2.6.0. Bumped to
+`torch==2.14.1` — the version mpsplat was tested with in F3 (`True`).
+
+### 2.3 ONE `resolve_device()` helper; all 16 hard-coded CUDA sites removed
+
+`src/ffsplat/device.py` gained:
+
+- `resolve_device(requested=None) -> torch.device` — MPS if available, else CUDA if available, else CPU;
+  an explicitly requested but unusable device (the historical hard-coded `"cuda"` / `"cuda:0"` on a Mac)
+  warns once and falls back. `cuda` is returned **only** when `torch.cuda.is_available()`, and `mps`
+  only when the MPS backend is available ⇒ Linux/CUDA behaviour is unchanged by construction.
+- `synchronize(device)` — `torch.mps.synchronize()` / `torch.cuda.synchronize()` / no-op on CPU, so
+  every accelerator wait goes through one helper.
+
+Call-site changes (all 16 sites):
+
+| file | was | now |
+|---|---|---|
+| `cli/convert.py:29` | `--device` default `"cuda:0"` | default `None` → `resolve_device(cfg.device)` |
+| `cli/view.py:82` | `.to("cuda")` | `.to(resolve_device())` |
+| `cli/view.py:30,31` | `camera.to("cuda")` | `.to(means_t.device)` (device taken from the input) |
+| `cli/live.py:275` | `.to("cuda")` | `.to(self.device)` (`self.device = resolve_device()`) |
+| `cli/live.py:369` | `.to("cuda")` | `.to(self.device)` |
+| `cli/live.py:538,539` | `camera.to("cuda")` | `.to(means_t.device)` |
+| `cli/live.py:788` | `device = "cuda"` | `device = self.conv_tool.device` |
+| `cli/eval.py:166` | `.to("cuda")` | `.to(resolve_device())` |
+| `cli/eval.py:125` | `device = "cuda"` | `device = resolve_device()` |
+| `cli/eval.py:35` | `torch.ones(..., device="cuda")` | `device=colors.device` |
+| `cli/eval.py:72,73,75,87` | `torch.cuda.Event` + `torch.cuda.synchronize()` | `time.perf_counter()` + `synchronize(device)` |
+
+```python
+$ .venv/bin/python -c "from ffsplat.device import resolve_device; print(resolve_device(), resolve_device('cuda:0'), resolve_device('cpu'))"
+[device] 'cuda:0' is not usable on this machine; using 'mps' instead.
+mps mps cpu
+```
+
+### 2.4 `grep -rn "cuda" src/ffsplat/` — every hit classified
+
+```
+$ grep -rn "cuda" src/ffsplat/ --include=*.py
+src/ffsplat/device.py:45:    if torch.cuda.is_available():                      [guard: the availability check itself]
+src/ffsplat/device.py:46:        return torch.device("cuda")                    [guard: unreachable unless is_available()]
+src/ffsplat/device.py:55,56,59: docstring                                      [comment/doc]
+src/ffsplat/device.py:68:  (device.type == "cuda" and torch.cuda.is_available())  [guard]
+src/ffsplat/device.py:87:  docstring                                        [comment/doc]
+src/ffsplat/device.py:91:    elif device.type == "cuda":                        [guard: else-branch of the MPS test]
+src/ffsplat/device.py:92:        torch.cuda.synchronize()                       [guarded: only in the cuda branch]
+src/ffsplat/models/clustering.py:5: docstring                                  [comment/doc]
+src/ffsplat/cli/convert.py:34: help text                                      [comment/doc]
+src/ffsplat/cli/eval.py:74: comment                                           [comment/doc]
+```
+
+Non-comment/non-docstring executable CUDA references, exhaustively: `device.py:45` and `device.py:68`
+(both `torch.cuda.is_available()`, i.e. the availability predicate) and `device.py:92`
+(`torch.cuda.synchronize()`, inside `elif device.type == "cuda"`). **Claim: there is no reachable
+runtime CUDA path on MPS** — verified at the end of Stage 3 with a runtime assertion.

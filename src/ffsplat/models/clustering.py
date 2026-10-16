@@ -107,7 +107,7 @@ class KMeans:
         self.n_clusters = int(n_clusters)
         self.distance = distance
         self.verbose = verbose
-        self.max_iter = int(max_iter)
+        self.max_iter = max(1, int(max_iter))
         self.seed = int(seed)
         self.max_samples = int(max_samples)
         self._centroids: Tensor | None = None
@@ -123,57 +123,67 @@ class KMeans:
         """Fit the codebook. ``x`` is ``[D, N]`` (features x samples, as torchpq used)."""
         if x.ndim != 2:
             raise ValueError(f"Expected a 2D tensor [D, N], got shape {tuple(x.shape)}")
-        d, n = x.shape
+        n = x.shape[1]
         if n == 0:
             raise ValueError("Cannot fit k-means on an empty tensor")
         k = min(self.n_clusters, n)
-        device = x.device
 
         with torch.no_grad():
-            x = x.to(torch.float32)
-            samples = x.t().contiguous()  # [N, D]
-
-            gen = torch.Generator(device="cpu").manual_seed(self.seed)
-            cap = min(n, self.max_samples, max(4 * self.n_clusters, 200_000))
-            if cap < n:
-                idx = torch.randperm(n, generator=gen)[:cap].to(device)
-                fit_data = samples[idx]
-                if self.verbose:
-                    print(f"k-means: fitting on a {cap}/{n} subsample ({k} clusters, {d} dims, {self.distance})")
-            else:
-                fit_data = samples
-                if self.verbose:
-                    print(f"k-means: fitting on all {n} samples ({k} clusters, {d} dims, {self.distance})")
-
-            # Random distinct-point initialisation: k-means++ would need k passes
-            # over the data, which is not affordable at K = 65536.
-            init_idx = torch.randperm(fit_data.shape[0], generator=gen)[:k].to(device)
-            centroids = fit_data[init_idx].clone()
-
-            chunk = _chunk_rows(k)
-            labels = None
-            for iteration in range(self.max_iter):
-                new_labels = _assign(fit_data, centroids, self.distance, chunk)
-                if labels is not None and torch.equal(new_labels, labels):
-                    if self.verbose:
-                        print(f"k-means: converged after {iteration} iteration(s)")
-                    labels = new_labels
-                    break
-                labels = new_labels
-                centroids = self._update_centroids(fit_data, labels, centroids)
-                if self.verbose:
-                    print(f"k-means: iteration {iteration + 1}/{self.max_iter} done")
-
+            samples = x.to(torch.float32).t().contiguous()  # [N, D]
+            fit_data, generator = self._select_fit_set(samples, n)
+            centroids = self._initialise(fit_data, k, generator)
+            labels = self._lloyd(fit_data, centroids)
             # A single full-data pass so every sample gets a label consistent with
             # the centroids we return (fit_data may have been a subsample).
             if fit_data.shape[0] != n:
-                labels = _assign(samples, centroids, self.distance, chunk)
+                labels = _assign(samples, centroids, self.distance, _chunk_rows(k))
 
             self._centroids = centroids.t().contiguous()  # [D, K]
             if self.verbose:
                 _, counts = labels.unique(return_counts=True)
                 print(f"k-means: done - {counts.numel()} non-empty clusters of {k}")
             return labels
+
+    def _select_fit_set(self, samples: Tensor, n: int) -> tuple[Tensor, torch.Generator]:
+        """Bounded random subsample used for the Lloyd search (``samples`` is ``[N, D]``)."""
+        generator = torch.Generator(device="cpu").manual_seed(self.seed)
+        cap = min(n, self.max_samples, max(4 * self.n_clusters, 200_000))
+        if cap >= n:
+            if self.verbose:
+                print(f"k-means: fitting on all {n} samples ({self.n_clusters} clusters, {self.distance})")
+            return samples, generator
+
+        index = torch.randperm(n, generator=generator)[:cap].to(samples.device)
+        if self.verbose:
+            print(f"k-means: fitting on a {cap}/{n} subsample ({self.n_clusters} clusters, {self.distance})")
+        return samples[index], generator
+
+    def _initialise(self, fit_data: Tensor, k: int, generator: torch.Generator) -> Tensor:
+        """Random distinct-point initialisation.
+
+        k-means++ would need ``k`` passes over the data, which is not affordable at
+        ``K = 65536`` for the SOG codebooks.
+        """
+        init_index = torch.randperm(fit_data.shape[0], generator=generator)[:k].to(fit_data.device)
+        return fit_data[init_index].clone()
+
+    def _lloyd(self, fit_data: Tensor, centroids: Tensor) -> Tensor:
+        """Alternate assignment and exact centroid update until the labels settle."""
+        chunk = _chunk_rows(centroids.shape[0])
+        labels = None
+        for iteration in range(self.max_iter):
+            new_labels = _assign(fit_data, centroids, self.distance, chunk)
+            if labels is not None and torch.equal(new_labels, labels):
+                if self.verbose:
+                    print(f"k-means: converged after {iteration} iteration(s)")
+                return new_labels
+            labels = new_labels
+            centroids = self._update_centroids(fit_data, labels, centroids)
+            if self.verbose:
+                print(f"k-means: iteration {iteration + 1}/{self.max_iter} done")
+        # The loop moves the centroids one step ahead of the labels it computed, so
+        # assign once more to return labels that match the returned centroids.
+        return _assign(fit_data, centroids, self.distance, chunk)
 
     def _update_centroids(self, data: Tensor, labels: Tensor, prev: Tensor) -> Tensor:
         """Exact centroid update; empty clusters keep their previous position."""

@@ -32,9 +32,7 @@ def encode_ply(fields: dict[str, Field], path: Path) -> None:
         # instead of letting numpy raise an opaque broadcast error.
         value = field.data.reshape(num_primitives, -1)
         if value.shape[1] != 1:
-            raise ValueError(
-                f"PLY property '{field_name}' must be scalar, got shape {tuple(field.data.shape)}"
-            )
+            raise ValueError(f"PLY property '{field_name}' must be scalar, got shape {tuple(field.data.shape)}")
         vertex_data[field_name] = value[:, 0].cpu().numpy()
 
     vertex_element = PlyElement.describe(vertex_data, "vertex")

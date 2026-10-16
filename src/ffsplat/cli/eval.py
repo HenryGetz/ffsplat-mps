@@ -1,4 +1,5 @@
 import os
+import time
 from argparse import ArgumentParser
 from collections import defaultdict
 from pathlib import Path
@@ -18,6 +19,7 @@ from ..coding.scene_decoder import decode_gaussians
 from ..datasets.blenderparser import BlenderParser
 from ..datasets.colmapparser import ColmapParser
 from ..datasets.dataset import Dataset
+from ..device import resolve_device, synchronize
 from ..models.gaussians import Gaussians
 
 
@@ -32,7 +34,7 @@ def rasterize_splats(
     use_white_background: bool = False,
 ) -> tuple[Tensor, Tensor, dict]:
     colors = gaussians.sh.data
-    background = torch.ones(1, colors.shape[-1], device="cuda") if use_white_background else None
+    background = torch.ones(1, colors.shape[-1], device=colors.device) if use_white_background else None
     render_colors, render_alphas, info = rasterization(
         means=gaussians.means.data,
         quats=gaussians.quaternions.data,
@@ -69,11 +71,10 @@ def eval_step(
     masks = data["mask"].to(device) if "mask" in data else None
     height, width = pixels.shape[1:3]
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    torch.cuda.synchronize()
-    start_event.record()
+    # host-side timing: torch.cuda.Event is CUDA-only, so measure with perf_counter
+    # and wait through the device-agnostic synchronize() helper.
+    synchronize(device)
+    start_time = time.perf_counter()
     colors, _, _ = rasterize_splats(
         gaussians=gaussians,
         camtoworlds=camtoworlds,
@@ -83,9 +84,8 @@ def eval_step(
         masks=masks,
         use_white_background=white_background,
     )  # [1, H, W, 3]
-    end_event.record()
-    torch.cuda.synchronize()
-    elapsed_time = start_event.elapsed_time(end_event) / 1000.0
+    synchronize(device)
+    elapsed_time = time.perf_counter() - start_time
 
     colors = torch.clamp(colors, 0.0, 1.0)
     canvas_list = [pixels, colors]
@@ -122,7 +122,7 @@ def get_directory_size(path: Path) -> int:
 def evaluation(gaussians: Gaussians, valset: Dataset, data_path: Path, results_path: Path) -> None:
     """Entry for evaluation."""
     print("Running evaluation...")
-    device = "cuda"
+    device = resolve_device()
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
     psnr = PeakSignalNoiseRatio(data_range=1.0).to(device)
     lpips = LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=False).to(device)
@@ -163,7 +163,7 @@ def main():
 
     args = parser.parse_args()
 
-    gaussians = decode_gaussians(args.data_path, "smurfx").to("cuda")
+    gaussians = decode_gaussians(args.data_path, "smurfx").to(resolve_device())
 
     dataset_dir = args.dataset_path
 
