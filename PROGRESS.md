@@ -1033,6 +1033,14 @@ button runs the identical, verified encoder — including this port's pure-PyTor
 | `live preview` checkbox | no | not driven |
 | live viewer's Evaluation tab | no | not driven (the eval CLI path is verified separately in §2.9/§2.11) |
 
-Artifacts: `live_mps_browser.png`, `live_mps_convert.png` (full-size, still encoding),
-`live_mps_convert_inprogress.png`, `live_mps_convert_completed_tiny.png` (completed).
-The live server processes were stopped afterwards; port 8080 is free.
+Artifacts, with pixel statistics and an independent vision-judge verdict on each (so what each depicts is
+recorded explicitly):
+
+| artifact | size | mean pixel | non-black | judge |
+|---|---|---|---|---|
+| `live_mps_browser.png` | 1600x1125 | 0.6930 | 0.9935 | `rendered_3d_scene` (p=1.0), `yes_controls_visible` (p=1.0) |
+| `live_mps_convert_inprogress.png` | 1600x1125 | 0.6989 | 0.9928 | viewer + disabled Convert visible |
+| `live_mps_convert.png` | 1600x1125 | 0.6998 | 0.9931 | same, encoding still in progress |
+| `live_mps_convert_completed_tiny.png` | 1600x1125 | 0.3955 | 0.6764 | `rendered_3d_scene` (p=1.0), `yes_controls_visible` (p=1.0) |
+
+The live server processes were stopped afterwards; port 8080 is free and no `ffsplat live` process remains.
