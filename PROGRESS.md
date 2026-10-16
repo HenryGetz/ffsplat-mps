@@ -239,3 +239,234 @@ Artifacts: `gate_mpsplat_render.png` (801712 B), `gate_mpsplat_render_vs_gt.png`
 - render correct: PSNR 20.43 dB vs the real photograph, luma corr 0.915, judge = same scene, clear 3D object.
 
 **→ Proceed autonomously to Stage 1, then Stage 2, then Stage 3. No permission checkpoints.**
+
+---
+
+## Stage 1 — CONVERT (MPS-capable pure-PyTorch path)
+
+### 1.1 Packaging: drop CUDA from the dependency graph
+
+Edits to `pyproject.toml`:
+
+- removed `"torchpq>=0.3.0.6,<0.4.0"` and `"cupy-cuda12x>=13.4.1,<14.0.0"` (torchpq was imported at
+  module scope by `models/transformations.py` and dragged in cupy-cuda12x);
+- removed the `[[tool.uv.index]]` block pointing at `https://download.pytorch.org/whl/cu126`;
+- `[tool.deptry.per_rule_ignores] DEP002 = ["torchvision"]` (cupy entry gone) — `grep -n "cupy\|cuda\|torchpq" pyproject.toml` → nothing;
+- kept `torch==2.6.0` (**tried first as instructed — it resolves and runs on macOS arm64**, no bump needed for Stage 1);
+- added `[tool.uv] override-dependencies = ["lapjv; sys_platform != 'darwin'"]` — see 1.2.
+
+### 1.2 Blocker found & worked around: `lapjv` cannot build on Darwin
+
+`uv sync` initially failed:
+
+```
+  × Failed to build `lapjv==1.3.27`
+  ╰─▶ Call to `setuptools.build_meta.build_wheel` failed (exit status: 1)
+        File "<string>", line 53, in <module>
+      KeyError: 'Darwin'
+  help: `lapjv` (v1.3.27) was included because `ffsplat` (v0.1) depends on `plas` (v0.1) which depends on `lapjv`
+```
+
+Evidence it is a dead dependency, not a needed one:
+
+```
+$ grep -rn "lapjv" <PLAS @4f1109c>/plas/     -> (none)
+$ grep -rn "lapjv" <PLAS @4f1109c>/          -> eval/flas.py:10:import lapjv as lap
+$ sed -n '12,20p' <PLAS>/plas/core.py
+import numpy as np
+import torch
+import time
+import kornia
+...
+$ lapjv setup.py, every version 1.3.24/1.3.26/1.3.27/1.3.29:
+  # "Darwin": [*UNIX_CXXFLAGS],  not supported anymore due to M1, PRs welcome
+```
+
+PLAS's runtime package (`plas/core.py`, `plas/vad.py`) imports only numpy/torch/kornia/tqdm; `lapjv` appears
+only in PLAS's upstream evaluation script `eval/flas.py`, which ffsplat never imports. Dropped on macOS only
+(the override carries `sys_platform != 'darwin'`, so Linux/CUDA resolution is unchanged). Also verified no
+published `lapjv` version ships a macOS wheel (`1.3.22` has only x86_64 cp38/39/310).
+
+`uv sync` then succeeded on Python 3.13.12.
+
+### 1.3 Clean-environment evidence: **no CUDA packages**
+
+```
+$ uv pip list --python .venv/bin/python | wc -l
+132
+$ uv pip list --python .venv/bin/python | grep -icE "^(cupy|nvidia|cuda)"
+0
+$ uv pip list --python .venv/bin/python | grep -iE "cupy|nvidia|cuda"
+(NONE)
+$ grep -riE "cupy-cuda|nvidia-cuda|pytorch-cu1" .venv/lib/python3.13/site-packages/*.dist-info/METADATA
+  torch-2.6.0.dist-info/METADATA:Requires-Dist: nvidia-cuda-nvrtc-cu12==12.4.127; platform_system == "Linux" and platform_machine == "x86_64"
+  (… same for nvidia-cuda-runtime/cupti; all marked Linux+x86_64, i.e. inapplicable on macOS …)
+
+$ uv tree --python .venv/bin/python --depth 1
+Resolved 146 packages in 18ms
+ffsplat v0.1
+├── camorph v0.3.6
+├── gsplat v1.4.0
+├── jaxtyping v0.2.38
+├── jsonargparse v4.40.0
+├── numpy v2.2.6
+├── opencv-python v4.12.0.88
+├── pillow v11.3.0
+├── pillow-heif v0.22.0
+├── plas v0.1
+├── plyfile v1.1.2
+├── pyyaml v6.0.2
+├── torch v2.6.0
+├── torchmetrics v1.7.4
+├── torchvision v0.21.0
+├── tqdm v4.67.1
+└── viser v0.2.23
+
+$ .venv/bin/python -c "import torch; print(torch.__version__, torch.backends.mps.is_available(), hasattr(torch.mps,'compile_shader'))"
+2.6.0 True False
+```
+
+**Noted for Stage 2**: `torch.mps.compile_shader` is **absent in torch 2.6.0** (`False`). mpsplat's Metal
+kernels require it (`gsplat/mps/__init__.py: is_metal_available()`), so Stage 2 must bump torch. Recorded then.
+
+### 1.4 `transformations.py:17` — torchpq k-means replaced (MPS-capable, pure PyTorch)
+
+- removed the top-level `from torchpq.clustering import KMeans`; `transformations.py` now does
+  `from .clustering import KMeans`.
+- new module `src/ffsplat/models/clustering.py`: float32-only, device-agnostic k-means supporting
+  `euclidean` / `cosine` / `manhattan`, chunked so the `N x K` score matrix is never materialised.
+  Because the SOG templates ask for `K = 65536`, centroids are fitted on a bounded subsample
+  (`min(N, max(4K, 200_000))`, capped at `max_samples`) followed by one chunked full-data assignment pass,
+  so every primitive gets a label consistent with the returned centroids.
+- API kept identical to the part of torchpq's surface `Cluster.apply` used: `.fit([D,N]) -> [N] int64`,
+  `.centroids -> [D,K] float32`, `KMeans(n_clusters=, distance=, verbose=)`.
+- `grep -rn torchpq src/ tests/` → only prose in docstrings.
+
+### 1.5 MPS dtype gap: `uint16` is not representable
+
+`--device mps` failed in `convert_to_dtype`:
+
+```
+File "src/ffsplat/models/transformations.py", line 39, in convert_to_dtype
+    field_data = field_data.to(torch.uint16)
+TypeError: Trying to convert UInt16 to the MPS backend but it does not have support for that dtype.
+```
+
+`uint16`/`uint32` are only **intermediate carriers** here: `SplitBytes` immediately widens to
+`int32`/`int64` and masks with `0xFF` (line 670), and the decoder rebuilds the value from the byte images
+into `int32`/`int64` (`Combine`, line 1011). Nothing depends on the tensor really being `uint16`.
+
+- new module `src/ffsplat/device.py` → `encoding_dtype(device, dtype)` maps `uint16->int32`,
+  `uint32->int64` **on MPS only**; identity on CPU/CUDA.
+- `convert_to_dtype` casts through it for uint8/uint16/int32/uint32.
+
+### 1.6 Upstream blocker found & fixed: `encode_ply` rejected `[N, 1]` fields
+
+`ffsplat convert ... --output-format 3DGS-INRIA-ply` failed on **pristine upstream code**:
+
+```
+$ .venv/bin/ffsplat convert --input truck_tiny202.ply --input-format 3DGS-INRIA.ply \
+      --output /tmp/ident.ply --output-format 3DGS-INRIA-ply --device cpu
+File "src/ffsplat/io/ply.py", line 28, in encode_ply
+    vertex_data[field_name] = field.data.cpu().numpy()
+ValueError: could not broadcast input array from shape (40804,1) into shape (40804,)
+```
+
+Reproduced with an *identity* conversion, and `git diff --stat HEAD -- src/ffsplat/io/ply.py src/ffsplat/coding/scene_decoder.py`
+is empty (both files untouched by this port) ⇒ pre-existing. Cause: `scene_decoder._create_scene` deliberately
+does `opacities_field.data.unsqueeze(-1)` → `[N,1]`, and the `to_field` op keeps that shape, but a PLY vertex
+property is a scalar. Fixed at the writer boundary: `encode_ply` now squeezes a trailing singleton dim and
+raises a named `ValueError` for genuinely multi-component fields (previously an opaque numpy broadcast error).
+Regression tests: `tests/test_ply_io.py`.
+
+### 1.7 PLAS (pure PyTorch + kornia) validated on CPU **and** MPS
+
+PLAS runs unmodified (`plas == 0.1` @ `4f1109c`). Device comes from the input tensor. kornia
+`gaussian_blur2d` works on both backends:
+
+```
+DEVICE: cpu
+  kornia gaussian_blur2d OK shape=(1, 3, 256, 256) in 0.003s
+  sort_with_plas OK grid=(2,64,64) idx.shape=(1, 64, 64) dev=cpu in 0.90s
+DEVICE: mps
+  kornia gaussian_blur2d OK shape=(1, 3, 256, 256) in 0.555s
+  sort_with_plas OK grid=(2,64,64) idx.shape=(1, 64, 64) dev=mps:0 in 13.49s
+```
+
+Added the instructed per-call CPU fallback (`PLAS._sort_with_fallback`): if `sort_with_plas` raises
+`RuntimeError`/`NotImplementedError` on a non-CPU device it retries once on CPU, prints
+`[PLAS] sort_with_plas failed on device '…' (…); retrying on CPU.` and moves the result back.
+**It never triggered on this machine** — no such line appears in any run.
+
+PLAS scaling (2-channel grid, `improvement_break=1e-4`, as the SOG-web template uses):
+
+| grid | cells | cpu | mps |
+|---|---|---|---|
+| 256² | 65 536 | 5.1 s | 29.8 s |
+| 512² | 262 144 | 21.6 s | 64.3 s |
+| 768² | 589 824 | 50.4 s | 129.0 s |
+
+(≈linear in cells; the real truck scene needs 1594².)
+
+### 1.8 Round-trip validation
+
+Commands (via `ffsplat-fixtures/roundtrip_check.py <device> <ply> <tag>`):
+
+```
+.venv/bin/ffsplat convert --input <ply> --input-format 3DGS-INRIA.ply    --output <w>/sog    --output-format SOG-web        --device <dev>
+.venv/bin/ffsplat convert --input <w>/sog --input-format smurfx          --output <w>/out_ply --output-format 3DGS-INRIA-ply --device <dev>
+```
+
+Rehearsal on a 202² = 40 804-primitive perfect-square subsample of the real truck PLY
+(`ffsplat-fixtures/raw/truck_tiny202.ply`), **both devices PASS**:
+
+```
+### device=cpu input=raw/truck_tiny202.ply
+encode 18.0s  decode 1.3s
+input : N=40804 props=62 format=binary_little_endian bytes=10120922
+output: N=40804 props=59 format=binary_little_endian bytes=9631220
+sog container bytes=1178832 files=[container_meta.yaml, f_dc.avif, f_rest_centroids.avif,
+   f_rest_labels_bytes_0.avif, f_rest_labels_bytes_1.avif, means_bytes_0.avif, means_bytes_1.avif,
+   opacities.avif, quaternions.avif, scales.avif]
+dropped props: ['nx', 'ny', 'nz']   extra props: []
+dtype: input float32 OK / output float32 OK
+(nx,ny,nz are the unused 3DGS normals; the 3DGS-INRIA writer does not emit them)
+CHECK bbox: max-abs-delta=0.004898 scene-extent=134.885 rel=3.63e-05 (tol abs 0.01)
+CHECK opacity(prob): mean_delta=0.000057 median_delta=0.003599 worst-q(0.01,0.5,0.99)_delta=0.003599 (tol 0.05)
+CHECK per-property mean/range worst = 0.0160 (tol 0.02)
+ROUNDTRIP OK
+```
+
+The **MPS** run prints byte-identical CHECK lines (bbox 0.004898 / opacity 0.003599 / mean-range 0.0160) —
+`### device=mps`, `encode ~40s`, `ROUNDTRIP OK`. Rationale for the tolerances: the SOG-web template
+quantises means to 16 bit, f_dc to 8 bit, rot/scales to 6 bit, opacities to 6 bit (compared in probability
+space) and the SH residual to a 5-bit 65 536-entry codebook, so a lossy reconstruction is expected by design.
+Gaussian count preserved, float32 in and out, nothing invented.
+
+**Note (upstream, not a port defect): the SOG bytes are not reproducible run-to-run**, because ffsplat calls
+`sort_with_plas` without a `seed`, and PLAS then consumes unseeded `np.random.randint` block shifts plus
+`torch.randperm`. Evidence — two *identical CPU* invocations of the same command:
+
+```
+run1 out sha256: 4c2f3072006905a2c056745fed2340e0884da7329bea61e377e97987f2e41f2d
+run2 out sha256: 1f510af3ca94621a488d19022b4da3e244476a810600ae49ca1bc0ccb9fb7022
+decoded PLY identical: False
+differing sog files between two CPU runs: ['f_dc.avif', 'f_rest_labels_bytes_0.avif',
+   'f_rest_labels_bytes_1.avif', 'means_bytes_0.avif', 'means_bytes_1.avif',
+   'opacities.avif', 'quaternions.avif', 'scales.avif']
+```
+
+`container_meta.yaml` and `f_rest_centroids.avif` (written *before* the sort) are bit-identical every run,
+and the decoded value multisets agree to 6 dp — i.e. the primitives are the same set in a different order.
+Comparisons therefore have to be order-independent, which is what the checker does.
+
+### 1.9 Tests
+
+`tests/test_clustering.py` (new, 9 tests) + `tests/test_ply_io.py` (new, 2 tests) + upstream
+`tests/test_transformations.py`:
+
+```
+$ .venv/bin/python -m pytest -q
+.............                                                            [100%]
+13 passed in 0.92s
+```
