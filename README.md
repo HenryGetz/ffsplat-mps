@@ -139,6 +139,12 @@ Full-size truck round-trip, 2,541,226 -> 2,540,836 Gaussians (the SOG-web templa
 |---|---|---|
 | `--device cpu` (torch 2.6.0) | 863.6 s (14 min 24 s) | 6.3 s |
 | `--device mps` (torch 2.14.1) | 663.8 s (11 min 4 s) | 5.8 s |
+| `--device mps`, fresh clone, machine otherwise idle | **425.8 s (7 min 6 s)** | 6.1 s |
+
+The 663.8 s figure was measured while `uv sync`/`pytest`/`mypy`/`deptry`/`ruff` were running concurrently
+on the same machine, so the idle-machine 425.8 s is the representative MPS number. Take these as
+order-of-magnitude guidance on this class of machine: the SOG encode is dominated by PLAS + the
+65 536-entry SH k-means, not by anything MPS-specific.
 
 The MPS encode is the faster of the two here — its k-means and AVIF/quantisation passes beat CPU by more
 than PLAS loses, even though PLAS alone is ~2x slower on MPS (table above). Both devices reproduce the

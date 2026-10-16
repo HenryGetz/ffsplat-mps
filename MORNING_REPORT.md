@@ -33,7 +33,7 @@ Artifacts: `gate_mpsplat_render.png`, `gate_mpsplat_render_vs_gt.png`.
 | 4 | full upstream test suite, failures explained | **DONE** | `pytest --doctest-modules` → **13 passed** (2 upstream + 11 added). Zero failures. `mypy` clean, `deptry` clean, `ruff check`/`ruff format --check` clean for every file this branch creates or edits; the 5 remaining ruff findings and 3 format complaints are **pre-existing upstream**, proven by `git diff --quiet 3fb6444` on the files and lines that carry them. |
 | 5 | no reachable CUDA runtime path on MPS | **DONE** | `grep -rn cuda src/ffsplat/` → 12 hits, all comments/docstrings except `torch.cuda.is_available()` (the availability predicate itself) and one `torch.cuda.synchronize()` inside an `elif device.type == "cuda"` branch. Proven at runtime: with 14 `torch.cuda.*` entry points trapped to raise, an MPS run of device resolution + PLY decode + `view.render_fn` + `eval.rasterize_splats` reported **0 trapped calls**. |
 | 6 | fork README: Apple Silicon section + measured timings | **DONE** | `README.md` §"Apple Silicon (MPS) support": install, what works/doesn't, and M1 Max timings in seconds (raster call 5.73 s cold / 1.72 s warm; PLAS 5.1/21.6/50.4 s cpu vs 29.8/64.3/129.0 s mps; full-size encode 663.8 s mps / 863.6 s cpu). |
-| 7 | small commits, no force-push | **DONE** | 6 commits on `apple-silicon`, pushed to the fork only. |
+| 7 | small commits, no force-push | **DONE** | 7 commits on `apple-silicon` (§7), pushed to the fork only; never force-pushed, never opened upstream. |
 
 ---
 
@@ -144,5 +144,11 @@ sha256 in PROGRESS.md §0.3). The `eval` command needs them.
 ## 7. Commits on `apple-silicon`
 
 ```
-@@COMMITS@@
+01bb110 Stage 0: PROGRESS.md with F1/F2/F3 evidence + F4 gate decision (MPS gate PASS)
+d364612 Stage 1: MPS-capable convert path (drop CUDA deps, pure-torch kmeans, MPS dtype/PLAS-fallback, PLY scalar write)
+167d83a Stage 2: vendor mpsplat 1.5.3 (MPS Metal provider), one resolve_device()/synchronize() helper, remove all hard-coded CUDA device sites
+b807068 Revert unrelated ruff --fix churn in _renderer.py / get_dynamic_params (not part of this port)
+c2ed58d Stage 2/3: fix eval startup (missing verbose), satisfy mypy, exclude vendored upstream tree from ruff/deptry/pre-commit, record gates
+36827f4 Stage 3: Apple Silicon README section, MORNING_REPORT, full-size MPS round-trip + eval evidence
+# 7th commit: Stage 3 clean-clone validation results, timings note, this list
 ```

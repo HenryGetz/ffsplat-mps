@@ -791,3 +791,75 @@ NO REACHABLE CUDA PATH ON MPS: OK (0 trapped torch.cuda calls)
 ```
 
 (14 public `torch.cuda.*` entry points were replaced with traps that record and raise before the run.)
+
+### 3.2 Clean-clone validation (fresh clone, fresh venv, documented steps only)
+
+A brand-new clone of the fork (`/Users/henrygetz/Downloads/ffsplat-clean`, 0 dirty files) with a fresh
+`uv sync`, running only the commands documented in the README. Script:
+`ffsplat-fixtures/clean_clone_validation.sh`.
+
+```
+===== clean clone: c2ed58dd1eb5561cf3521e1d6c01007634b63bdc ; worktree: 0 dirty files
+===== env
+python 3.13.12
+torch 2.14.1 | mps True | compile_shader True
+gsplat -> /Users/henrygetz/Downloads/ffsplat-clean/vendor/mpsplat/gsplat/__init__.py
+metal True
+===== CUDA packages?
+NO CUDA PACKAGES
+===== convert PLY -> SOG-web (MPS)
+k-means: fitting on a 262144/2541226 subsample (65536 clusters, euclidean)
+... iteration 10/10 done
+k-means: done - 64161 non-empty clusters of 65536
+Successfully converted .../raw/truck/point_cloud.ply to /tmp/cc_sog
+
+real	7m5.804s
+===== convert SOG-web -> PLY (MPS)
+Successfully converted /tmp/cc_sog to /tmp/cc_back
+
+real	0m6.084s
+===== 1 render through the clean clone's own ffsplat.cli.view.render_fn (MPS)
+mode=view device=mps cuda_available=False
+loaded: Gaussians(N=2,541,226, sh_degree=3, device=mps:0)
+render_fn returned: <class 'numpy.ndarray'> (545, 978, 3) float32
+pixel stats: min=0.0137 max=1.0000 mean=0.4910 nonblack_frac=1.0000
+wrote /tmp/cc_view.png (794384 bytes)
+===== eval on the clean clone's own container (MPS)
+[Parser] 251 images, taken by 251 cameras.
+PSNR: 24.295, SSIM: 0.8461, LPIPS: 0.184 Time: 0.046s/image Number of GS: 2540836 Size: 31.444MB
+===== artifacts
+-rw-r--r--@ 1 henrygetz  wheel  599638774 Oct 15 23:47 /tmp/cc_back/point_cloud.ply
+-rw-r--r--@ 1 henrygetz  wheel    1762941 Oct 15 23:47 /tmp/cc_eval/eval_0000.png
+-rw-r--r--@ 1 henrygetz  wheel     794384 Oct 15 23:47 /tmp/cc_view.png
+ 31M	/tmp/cc_sog
+```
+
+- `uv sync` in the fresh clone: 2.5 s (warm uv cache).
+- Out PLY is byte-length-identical to the main-repo run (599,638,774 B) and the visualisation PNG is
+  byte-length-identical (794,384 B).
+- **The eval metrics are identical to the main-repo run** (PSNR 24.295, SSIM 0.8461, LPIPS 0.184) even
+  though PLAS shuffled differently, i.e. the port is reproducible where the codec is.
+- The MPS encode took **425.8 s** here with the machine otherwise idle, vs 663.8 s in §Stage 3, which was
+  measured while `uv sync`/`pytest`/`mypy`/`deptry`/`ruff` were running concurrently. Both are real
+  measurements; the idle-machine number is the representative one.
+
+### 3.3 Upstream test suite and gates — results table
+
+| check | command | result | failures tied to MPS? |
+|---|---|---|---|
+| unit tests | `pytest --doctest-modules -q` (`make test`) | **13 passed** in ~1 s | none — 0 failures |
+| lock consistency | `uv lock --locked` | `Resolved 150 packages` | n/a |
+| types | `mypy` | **Success: no issues found in 11 source files** | none |
+| dependencies | `deptry .` | **Success! No dependency issues found** | none |
+| lint | `ruff check --no-fix .` | 5 findings, **all pre-existing upstream** (4 in files this port never touched, the 5th not in the diff) | no |
+| format | `ruff format --check .` | 3 files "would reformat", **all pre-existing** upstream nested-quote f-string style | no |
+
+The suite is small (the repo ships 2 test functions); 11 tests were added for the new code
+(`tests/test_clustering.py`, `tests/test_ply_io.py`). The port introduces **zero** test failures.
+
+### 3.4 `grep -rn "cuda" src/ffsplat/` — final classification
+
+See §2.4 for the full 12-hit listing. Summary: 7 of the 12 hits are comments/docstrings, 4 are the
+availability guard itself (`torch.cuda.is_available()`), and exactly one is an actionable call
+(`torch.cuda.synchronize()` inside `elif device.type == "cuda"`, therefore unreachable on MPS).
+Runtime confirmation (no trapping, real MPS run) is in §3.1.
