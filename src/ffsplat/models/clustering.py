@@ -71,13 +71,19 @@ def _manhattan_blocks(rows: Tensor, centroids: Tensor) -> Tensor:
 
     The L1 metric has no matmul identity, so the score matrix has to be materialised by
     subtraction; the only questions are how big a block to materialise and whether to use a
-    fused kernel. ``torch.cdist(p=1)`` is the fused kernel, but on a whole chunk its MPS
-    implementation allocates an internal ``[C, B, D]`` buffer that scales with the row chunk:
-    above ~1600 rows (K=40804, D=45) it is either rejected
-    (``RuntimeError: Invalid buffer size: 22.50 GiB``) or - worse - returns silently wrong
-    labels (4/40804 correct, 0.00 s; PROGRESS.md B2.2). Calling it per *centroid block* keeps
-    the peak allocation bounded by ``_MAX_SCORE_ELEMS`` while keeping the fused kernel, and was
-    measured on the real shapes (one full assignment pass, labels compared element-wise):
+    fused kernel. ``torch.cdist(p=1)`` is the fused kernel, but on a whole row chunk it is
+    unsafe on MPS: its implementation allocates an internal ``[C, K, D]`` buffer, and whether
+    that turns out to be merely slow, rejected (``RuntimeError: Invalid buffer size``) or - the
+    dangerous case - silently wrong depends on the buffer size *and* the allocator state, not on
+    a clean row threshold. Observed on MPS with K=40804, D=45: 4/40804 correct labels for C=1644
+    in one process, 6/40804 for the same C=1644 in another process after a C=822 call, and
+    ``Invalid buffer size: 22.50 GiB`` at C=3287 here (22.49 GiB at C=3288 in the independent
+    audit; PROGRESS.md B2.2 and its audit section). A codec that can mislabel a
+    quarter of the primitives is worse than one that is 2x slower, so the block size is bounded
+    by ``_MAX_SCORE_ELEMS`` and ``cdist`` is called per *centroid block* on every device. That
+    keeps the fused kernel with a bounded peak allocation, and was measured on the real shapes
+    (one full assignment pass, labels compared element-wise against the previous implementation,
+    and re-verified independently at C=8192/B=400):
 
         N=40804,  K=40804,  D=45:  cpu 11.96 s ->  3.98 s   mps 5.00 s -> 4.12 s
         N=262144, K=65536, D=45:  cpu 118.19 s -> 38.24 s   mps 56.83 s -> 47.98 s

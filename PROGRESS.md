@@ -1704,8 +1704,9 @@ and shape as the encode uses (`kmeans_bench.py`, the whole 10-iteration fit + fu
 Codebook quality is unchanged: 64047 (cpu) / 64045 (mps) non-empty clusters of 65536, against
 64046/64045 before.
 
-`manhattan` (only the SOG-PlayCanvas profile uses it) was measured too, and **the blocked loop is kept
-on MPS deliberately**:
+`manhattan` (only the SOG-PlayCanvas profile uses it) was measured too. The shipped implementation
+(`_manhattan_blocks`, commit `1cee426`) calls `torch.cdist(p=1)` **per centroid block on every device**,
+with the block sized so the peak allocation stays at `_MAX_SCORE_ELEMS`:
 
 ```
  manhattan    40804   40804    cpu             cdist chunk x1     3.38  labels==cdist-x1 40804/40804
@@ -1718,12 +1719,18 @@ on MPS deliberately**:
  manhattan    40804   40804    mps        blocked abs().sum()     8.57  labels==cdist-x1 40804/40804
 ```
 
-`torch.cdist(p=1)` on MPS allocates an internal `[chunk, K, D]` buffer: at 1644 rows it returns in
-0.00 s with **silently wrong labels** (4/40804 correct) and at 3287 rows it raises
-`Invalid buffer size: 22.50 GiB`. A codec that silently mislabels 25 728 primitives is worse than one
-that is 2x slower, so MPS keeps the deterministic blocked accumulation (unchanged from before, bounded
-by `_MAX_SCORE_ELEMS`), while CPU/CUDA get `cdist(p=1)` (8.3x faster, labels identical). Both paths are
-in `_distances`/`_manhattan_blocked` with the measurement in the docstring.
+What the table above also shows is why the *earlier* form of this change was wrong: calling `cdist(p=1)`
+on a whole row chunk is unsafe on MPS. Its implementation allocates an internal `[C, K, D]` buffer, and
+the failure depends on that buffer's size **and the allocator state**, not on a clean row threshold -
+in the independent audit, C=1644 returned *correct* labels in a fresh process but garbage (6/40804
+correct) when it followed a C=822 call, and the rejection
+(`RuntimeError: Invalid buffer size: 22.49 GiB`) reproduced at C=3288. In this session's run the same
+C=1644 call returned 4/40804 correct labels in 0.00 s. A codec that can silently mislabel a quarter of
+the primitives is worse than one that is 2x slower, so the shipped code bounds the block
+(`_MAX_SCORE_ELEMS`) and stays correct: the per-centroid-block form was verified label-identical to the
+previous implementation at the two real shapes above, and the audit re-verified it at C=8192/B=400 and
+at the real shape. The numbers in the table are unchanged (48.0 s MPS / 38.2 s CPU recorded here; the
+audit measured 47.44 / 38.41 s).
 
 ### B2.3 `eval` + white background: **adopted** — measured equivalence, Metal path restored
 
@@ -1847,11 +1854,18 @@ real 324.83
 # container: 10 files, 32973468 bytes
 ```
 
-| full-size MPS encode | seconds | vs baseline |
+| full-size encode | seconds | note |
 |---|---|---|
-| pre-optimisation baseline (recorded, idle, fresh clone) | 425.8 | 1.00x |
-| **after the k-means change** | **324.8** | **1.31x faster** |
-| CPU baseline (recorded) | 863.6 | 2.66x slower than the new MPS number |
+| MPS, pre-optimisation baseline (recorded, idle, fresh clone) | 425.8 | baseline |
+| MPS, **at HEAD** | **324.8** | **1.31x faster than its own baseline** (the k-means change) |
+| CPU, pre-optimisation baseline (recorded) | 863.6 | baseline |
+| CPU, **at HEAD** (measured here after the audit) | **683.65** | container 32995454 B |
+
+**Like-for-like at HEAD: MPS 324.8 s vs CPU 683.65 s, i.e. ~2.1x.** The 863.6 s CPU figure must not be
+paired against the post-change MPS number: the same k-means change that took MPS 425.8 -> 324.8 s also
+took CPU 863.6 -> 683.65 s (1.59x on the k-means stage), so that pairing would overstate the MPS
+advantage as 2.66x. (An independent audit measured the same HEAD CPU encode at 664.97 s / 33,000,052 B,
+and the HEAD MPS encode at 326.99 s / 32,984,695 B.)
 
 **Per-stage attribution (instrumented run of the same workload, median of 1, all stages summed):**
 
@@ -1861,7 +1875,7 @@ real 324.83
 | k-means fit + full-data assignment | 42.88 | 12.6% |
 | image encode (9 files, avif) | 4.82 | 1.4% |
 | quantise / byte-split / reindex / reshaping | 0.13 | 0.04% |
-| **total (encode only, excludes the 5.2 s PLY load)** | **339.4** | |
+| **total (instrumented encode; the plain CLI run of the same workload is 324.8 s)** | **339.4** | |
 
 GPU utilisation (machine-wide `ioreg`, 5 Hz) during the 512² instrumented run, bucketed per stage by
 its own time window:
@@ -1948,7 +1962,9 @@ PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 ...    real 52.00
    utilisation during those stages: 26.7% mean (i.e. the GPU is idle while the encoders run). The only
    lever is the container's own `chroma`/`quality` parameters, which change the output.
 4. **PLY I/O and `container_meta.yaml` writing — CPU, by construction** (blocks the 0.13 s "other" bucket
-   plus the 5.2 s PLY parse on the full scene; both are file/parse work with no GPU equivalent).
+   plus the PLY parse: measured in-process at **0.44 s** for `decode_gaussians` on the 630 MB
+   full-size PLY plus 0.07 s for the one host-to-device copy (the instrumented run recorded
+   `load_s = 0.46`); both are file/parse work with no GPU equivalent).
 5. **SH degree > 4** is the one argument-level fallback left in the call chain: mpsplat evaluates SH on
    the pure-torch path when `K > 25` (`vendor/mpsplat/gsplat/cuda/_wrapper.py:374-387`). It is now
    announced by `ffsplat.device.warn_if_not_metal` and pinned by
@@ -2015,11 +2031,11 @@ upstream, never force-pushed. Harnesses and logs used for every number live outs
 |---|---|---|
 | every GPU-capable stage runs on MPS; CPU stages have a measured reason | done | README §"Device policy" (stage-by-stage table), B2.5, B4 |
 | no silent performance fallbacks on hot paths | done | `eval` composited `backgrounds` (B2.3, 44.8x measured); `tests/test_metal_path.py` traps all three torch fallbacks and pins `tile_size`/`backgrounds`/`masks`/`rasterize_mode`/SH degree; the SH-degree>4 fallback is the one that cannot be avoided and is now warned about |
-| full-size MPS encode beats the CPU baseline with per-stage attribution | done | 324.8 s vs 863.6 s CPU (baseline) and vs 425.8 s MPS (baseline); attribution PLAS 291.5 / k-means 42.9 / images 4.8 / quantise 0.13 (B3) |
+| full-size MPS encode beats the CPU baseline with per-stage attribution | done | like-for-like at HEAD: MPS 324.8 s vs CPU 683.65 s (~2.1x); MPS is also 1.31x faster than its own pre-optimisation baseline (425.8 s); attribution PLAS 291.5 / k-means 42.9 / images 4.8 / quantise 0.13 (B3) |
 | GPU-utilisation evidence per stage | done | k-means 99.7%, PLAS 84.6%, image encoding 26.7% (CPU-bound), whole run 88.2% (B3) |
 | all seven profiles' parity resolved | done | A1.3 (202²) and A1.5 (512²): every row PASS, with the single over-budget row (`SOG-web-sh-split`'s `f_dc`) resolved by the A1.5a control experiment rather than a threshold; four template bugs fixed with tests; three device-independent codec defects reported |
 | raster cold/warm + eval wall clock | done | 0.09 s cold / 0.033 s warm on Metal (5.13/1.69 s on the fallback); eval 0.045 s/image, metrics identical |
-| upstream tests + mypy/deptry/ruff clean for touched files | done | 23 passed; mypy/deptry/uv lock clean; `ruff check` "All checks passed" on every file touched (the 5 repo-wide findings and 3 format complaints are pre-existing upstream lines) |
+| upstream tests + mypy/deptry/ruff clean for touched files | done, with the caveat stated | 23 passed; mypy/deptry/uv lock clean; **no new findings**: the 5 `ruff check` findings (one of them `models/transformations.py:1533`, a file this branch edits) and the 3 `ruff format --check` complaints (`cli/eval.py`, `cli/live.py`, `models/transformations.py`) are pre-existing upstream lines, verified identical at `3fb6444` |
 | README + PROGRESS + MORNING_REPORT updated with measured numbers only | done | old numbers kept and labelled baseline |
 | worktree clean, commits small, pushed to the fork | done | `git status --short` empty; 14 commits pushed |
 
@@ -2028,3 +2044,72 @@ upstream, never force-pushed. Harnesses and logs used for every number live outs
 "original blocked manhattan" PlayCanvas encode time is marked `[INFERENCE]` (derived from the measured
 118.19 s per assignment pass, not run to completion); PLAS cannot be fixed without patching a PyPI wheel;
 manhattan/SH-degree>4 would need Metal kernels that mpsplat does not have (`vendor/` is frozen).
+
+---
+
+# Independent audit (2026-10-17)
+
+A second, read-only agent audited this review at head `b027843` by re-running the measurements from
+scratch (its own session, its own process runs). Its per-item verdicts:
+
+| item | audit verdict | its own numbers vs mine |
+|---|---|---|
+| device policy (GPU where a GPU implementation exists, CPU elsewhere with a measured reason) | **agrees** | — |
+| no hidden Metal fallbacks in the call chain | **agrees** | — |
+| PLAS reversal (MPS faster than CPU on the real 6-channel input) | **agrees** | 1594²: cpu 527.5 s / mps 279.5 s (mine: 621.6 / 278.7); 512²: cpu 43.55 s / mps 28.84 s (mine: 55.7 / 30.4). Same sign, same order of magnitude; PLAS runtime varies with its unseeded internal shuffle |
+| the `cdist` k-means change (substance: identical labels) | **agrees** | after: cpu 63.0 s / mps 22.0 s, clusters 64047 / 64045 (mine: 66.4 / 22.3, 64047 / 64045) |
+| parity matrix, the four template fixes, the three reported codec defects | **agrees** | — |
+| raster timings | **agrees** | — |
+| the independent rasteriser reference | **agrees** | MAE 4.191e-05 (mine: 4.191e-05) |
+| repository gates (pytest / mypy / deptry / ruff) | **agrees** | — |
+| full-size MPS encode end-to-end | **reproduced within 0.7%** | 326.99 s, container 32,984,695 B (mine: 324.83 s, 32,973,468 B) |
+| full-size per-stage attribution | **reproduced** | 289.7 / 42.8 / 4.87 / 0.12 s = 337.6 s (mine: 291.5 / 42.9 / 4.8 / 0.13 = 339.4 s) |
+
+It found **no fabrication and no functional MPS defect**, but it did find that the record overstated
+several numbers. Each of those is corrected in the commit that adds this section:
+
+1. **F1 - the PLY parse time.** The record said "5.2 s is the 630 MB PLY parse" in four places. That
+   number was wrong (it does not appear anywhere in the measurement logs). Re-measured in-process:
+   `decode_ply` 0.01 s, `decode_gaussians` (parse + the template's reshape/remap ops) **0.44 s**,
+   `.to("mps")` 0.07 s, i.e. **0.52 s** for what the stage profiler calls `load`, and the instrumented
+   full-size run recorded `load_s = 0.46`. The record now says 0.46-0.52 s and how it was measured.
+2. **F2 - the manhattan prose described a superseded implementation.** `_manhattan_blocked` does not
+   exist at HEAD; `_manhattan_blocks` calls `torch.cdist(p=1)` per centroid block on **all** devices
+   (that is what `1cee426` shipped). The B2.2 prose and the acceptance line now describe the shipped
+   code. The numbers are unchanged (48.0 / 38.2 s recorded; the auditor measured 47.44 / 38.41 s).
+3. **F3 - "clean for every file this branch touches" was too strong.** `ruff format --check` fails on
+   `cli/eval.py`, `cli/live.py` and `models/transformations.py`, and `ruff check` reports
+   `transformations.py:1533` - all on **pre-existing upstream lines**; the claim in README/PROGRESS is
+   now "no new findings", with the pre-existing status verified against `3fb6444`.
+4. **F4 - the README timing table summed to 339.4 under a 324.8 heading and mixed a 512² utilisation
+   column into a full-size table.** Retitled: 339.4 s is the *instrumented* encode (the extra 14.6 s is
+   the per-stage synchronisation the profiler adds; the plain CLI run is 324.8 s), and the utilisation
+   column now uses the full-size numbers (independent audit: PLAS 94.9%, k-means 99.8%, io_write 20.1%,
+   whole run 94.4%; my own full-size run recorded 94.2% whole-run).
+5. **F5 - the MPS-vs-CPU comparison was not like-for-like.** 863.6 s was measured *before* the k-means
+   change, which also made the CPU path 1.59x faster, so pairing it against the post-change MPS number
+   overstated the ratio as 2.66x. Like-for-like at HEAD, measured here: **MPS 324.8 s vs CPU 683.65 s
+   (auditor: 664.97 s) = ~2.10x**. The pre-optimisation numbers (425.8 s MPS / 863.6 s CPU) are now used
+   only as *baselines*, never paired against post-change numbers.
+6. **F6 - the `cdist(p=1)`-on-MPS hazard mechanism was described wrongly.** It is not a row threshold:
+   1644 rows returned correct labels in a fresh process but garbage (6/40804) when called after a
+   C=822 call, and the 22.49 GiB rejection reproduced at C=3288. The trigger is `cdist`'s internal
+   `[C, K, D]` buffer size interacting with allocator state. The conclusion is unchanged and still
+   holds: the per-centroid-block path is the shipped one and is safe (correct at C=8192/B=400 and at
+   the real shape, with labels compared element-wise).
+7. **F7 - the 202² claim was flatter than the data.** In the auditor's independent 202² run
+   `SOG-web-nosh` `f_dc` = 0.099582 and `SOG-web-sh-split` `f_dc` = 0.099844 against budgets
+   0.095100 / 0.094724, i.e. the harness row reads FAIL on a single run and needs the second CPU run
+   for the rerun-noise rule to fire, exactly as documented for sh-split at 512². README now says that.
+8. **F8 - one pure-torch op per render was missing from the gap list.** `isect_offset_encode` has no
+   Metal branch in mpsplat (`vendor/mpsplat/gsplat/cuda/_wrapper.py:953-972` always calls
+   `_torch_impl._isect_offset_encode`, and there is no implementation under `gsplat/mps/`); verified
+   here by trapping it: **exactly 1 call per `rasterization()`**, ~3.0% of the 33 ms warm render
+   (audit measurement). `tests/test_metal_path.py` cannot catch it by design - there is no Metal
+   alternative to fall back from. Now in *Known gaps*.
+9. **F9 - the COLMAP device-policy row cited code, not a measurement.** Measured here on a real
+   1957x1091 truck image: `cv2.initUndistortRectifyMap` 3.2 ms + `cv2.remap` 1.6 ms = **4.8 ms per
+   image** (32 eval images = 0.15 s). The row now carries that number.
+
+Nothing in this section changes executable behaviour: the commit that adds it touches documentation and
+code comments only.
