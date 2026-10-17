@@ -8,13 +8,22 @@
 
 ffsplat is a powerful framework to convert and compress 3D Gaussian Splatting scenes.
 
+Fork of [w-m/ffsplat](https://github.com/w-m/ffsplat) (Apache-2.0). This branch adds Apple-Silicon
+(MPS) support and ships an Apple-Silicon port of gsplat
+([zacsmms/mpsplat](https://github.com/zacsmms/mpsplat), Apache-2.0) plus
+[PLAS](https://github.com/fraunhoferhhi/PLAS) (Apache-2.0), each with its upstream licence
+retained and its pinned revision recorded.
+
 **NOTE: this code is pre-alpha, under heavy development, a community developer preview. Please expect more documentation in the coming weeks (July 2025).**
 
 - **Github repository**: <https://github.com/w-m/ffsplat/>
 
+**Apple Silicon:** this fork runs on Macs through PyTorch's MPS backend - no CUDA toolkit
+required; see [Apple Silicon (MPS) support](#apple-silicon-mps-support).
+
 ## Quick Start
 
-- Install CUDA 12.x
+- Install CUDA 12.x (Linux/NVIDIA; not needed on Apple Silicon - see below)
 - Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 Run
@@ -74,6 +83,15 @@ uv sync
 uv run ffsplat convert --help
 ```
 
+Requires **macOS 13+ (Apple Silicon)**, **uv >= 0.4** (the install uses `[tool.uv] override-dependencies`),
+and **Python 3.12-3.13**; `torch 2.14.1` is pinned and installed by `uv sync`. A cold install takes
+about 30 s on a warm network and needs no local files or paths.
+
+> Don't have a PLY to try? Any 3D Gaussian Splatting `.ply` works, e.g. one of the pretrained
+> [INRIA](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) or
+> [Mip-NeRF 360](https://jonbarron.info/mipnerf360/) scenes - pass it as `--input` with
+> `--input-format 3DGS-INRIA.ply`.
+
 What changed for this:
 
 - `cupy-cuda12x`, `torchpq` and the `pytorch-cu126` wheel index were dropped, and the SOG
@@ -124,11 +142,11 @@ two silently drop rendering onto the torch fallback.
 | `--output-format SOG-web-sh-split` | works | works |
 | `--output-format SOG-PlayCanvas` | works (scenes >= 65536 primitives) | works (same) |
 | `--output-format 3DGS-INRIA-ply` / `-nosh-ply` | works | works |
-| decode `smurfx` -> PLY (all SOG containers except `-nosh`) | works | works |
+| decode a SOG container -> PLY (`--input-format smurfx`, the container token; the `SOG-*` names are *profiles*, not input formats - `SOG-web` raises `ValueError: Unsupported input format`) | works | works |
 | round-trip `PLY -> SOG-web -> PLY`, 2.54M primitives | works, all budgets | works, all budgets |
 | `ffsplat view` / `ffsplat live` (browser, `localhost:8080`) | n/a | works |
 | `ffsplat eval` (real Tanks&Temples COLMAP set, 32 images) | n/a | works, SSIM + LPIPS on MPS |
-| `pytest --doctest-modules` | 23 passed | 23 passed |
+| `pytest --doctest-modules` | 33 passed | 33 passed |
 | `mypy`, `deptry`, `ruff check`, `ruff format --check` | no new findings (mypy/deptry clean; the 5 ruff check findings and 3 `ruff format --check` complaints are pre-existing upstream lines, verified unchanged against `3fb6444`) | same |
 
 ### Parity vs CPU
