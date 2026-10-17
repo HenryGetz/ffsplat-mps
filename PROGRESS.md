@@ -1467,3 +1467,54 @@ What this says, before any optimisation:
   i.e. the MPS encode is GPU-saturated on average — but that average hides the fact that the k-means
   matmuls and the sort are only ~10-15% efficient in bandwidth terms (see B2), and that the 2% image
   stage is pure CPU (the GPU goes idle there).
+
+## B2. Optimisations — each decided by measurement
+
+### B2.1 PLAS: **rejected** — MPS is faster than CPU on the real input at every measured grid
+
+The brief's premise (and the research brief's R1) was that PLAS is "~2x slower on MPS than CPU", based on
+`PROGRESS.md` §1.7. That measurement used a **2-channel random grid**; the SOG-web template actually feeds
+PLAS a **6-channel** grid (means -> signed-log -> 16-bit quantise -> split bytes -> standardize -> weighted
+concat), and PLAS's iteration count is data-dependent. So the real input was captured from the real encoder
+(`plas_real_bench.py build`, which intercepts `PLAS.sort` and saves exactly the tensor handed to
+`_sort_on_device` — `as_grid_img(params_tensor).permute(2,0,1)`) and re-measured:
+
+```
+$ .venv/bin/python plas_real_bench.py build raw/truck/point_cloud.ply 1594
+captured grid (6, 1594, 1594) (channels x H x W, 15245016 values) -> /tmp/plas_real_1594.pt
+grid = 1594x1594 = 2540836 cells, 6 channels, N was 2541226
+
+$ .venv/bin/python plas_real_bench.py bench 1594 2
+# sort_with_plas on the REAL SOG-web input, 6 channels, grid 1594x1594 (2540836 cells), improvement_break=1e-4
+  cpu run 1: 627.84s
+  cpu run 2: 615.40s
+  cpu: median 621.62s  min 615.40s
+  mps run 1: 273.47s
+  mps run 2: 284.01s
+  mps: median 278.74s  min 273.47s
+  ratio mps/cpu (median): 0.45x
+```
+
+and from B1 (real data, 512² / 6 channels): cpu 55.72 s median (51.5 / 55.7 / 76.8) vs mps 30.37 s median
+(30.0 / 30.4 / 31.9), i.e. **mps/cpu = 0.55** — the same sign as the full grid.
+
+| grid (real 6-channel input) | cpu | mps | mps/cpu |
+|---|---|---|---|
+| 202² (40 804 cells, from `truck_tiny202.ply`) | see B1 tiny run | see B1 tiny run | — |
+| 512² (262 144 cells) | 55.7 s (median of 3) | **30.4 s** (median of 3) | 0.55 |
+| 1594² (2 540 836 cells, the real scene) | 621.6 s (median of 2) | **278.7 s** (median of 2) | 0.45 |
+
+**Decision: no change.** Pinning the sort to the CPU on MPS — the research brief's R1 — would make ffsplat
+*2.2x slower at the only grid size that matters*, so the existing `_sort_with_fallback` (which retries on CPU
+only if MPS actually raises) is left exactly as it is. The old §1.7 table is now known to be
+unrepresentative; it is kept in the record as the pre-measurement baseline and labelled as such.
+
+The remaining PLAS cost is *inside upstream `plas`*: its inner loop calls `l2_dist(...)` which ends in
+`.item()` (`plas/core.py:91-92`) and then branches on that Python scalar, so every iteration is a host sync
+plus a burst of tiny kernels. Fixing that means patching a third-party wheel, which would not survive a clean
+clone (`plas==0.1` comes from PyPI), so it is **reported, not patched**. `torch.compile` cannot help either:
+the `.item()` is a graph break and MPS Inductor never fuses matmul
+(`torch/_inductor/kernel/mm_common.py:211`).
+
+At the full grid PLAS is therefore ~279 s of a ~426 s full-size MPS encode (**~65%**), and the honest
+statement is: *that stage is at its ceiling for this stack*.
