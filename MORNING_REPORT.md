@@ -3,7 +3,10 @@
 **Branch:** `apple-silicon` (forked to `https://github.com/HenryGetz/ffsplat`, never pushed upstream, never force-pushed)
 **Base commit:** `3fb6444c5faed6de9aa55fa2313df6c2a4104193` (upstream `w-m/ffsplat` HEAD, 2025-07-10)
 **Machine:** M1 Max MacBook Pro, 10 CPU cores, 32 GiB unified memory, macOS 27.0.0 (darwin), arm64 — everything below ran locally on this Mac.
-**Verdict:** all three stages completed. Port works end-to-end on MPS; the honest gaps are listed at the bottom.
+**Verdict:** all three stages completed, and the follow-up review (Phase A: parity, Phase B: performance;
+`PROGRESS.md` §Phase A / §Phase B) then resolved every remaining profile, corrected two numbers that had been
+measured on the wrong code path, and made the MPS full-size encode 1.31x faster. The honest gaps are listed
+at the bottom — sections marked **[Phase A/B]** were revised by that review.
 
 Full chronological evidence with verbatim command output: [`PROGRESS.md`](PROGRESS.md).
 
@@ -32,7 +35,7 @@ Artifacts: `gate_mpsplat_render.png`, `gate_mpsplat_render_vs_gt.png`.
 | 3 | live / view / eval render the real PLY on MPS + PNGs | **DONE** | `view_mps.png`, `live_mps.png` (978x545, mean pixel 0.491, non-black 100%), `view_mps_browser.png` (real `ffsplat view` CLI driven by a browser: 1600x1125, mean 0.609, viewer reports `Connected Rendering`), `eval_mps.png`. **`live` was additionally launched as a real process** (entry point, not an import) and driven by a browser: `live_mps_browser.png` (1600x1125, mean pixel 0.693, viewer reports `Showing scene: 0` / `Rendering`), and its GUI **Convert** button runs to completion on MPS — `live_mps_convert_completed_tiny.png` records `SOG-web` container written + `Showing scene: 1`, while `live_mps_convert.png` / `live_mps_convert_inprogress.png` record the full-size attempt still encoding when the ~30 min budget expired. |
 | 4 | full upstream test suite, failures explained | **DONE** | `pytest --doctest-modules` → **13 passed** (2 upstream + 11 added). Zero failures. `mypy` clean, `deptry` clean, `ruff check`/`ruff format --check` clean for every file this branch creates or edits; the 5 remaining ruff findings and 3 format complaints are **pre-existing upstream**, proven by `git diff --quiet 3fb6444` on the files and lines that carry them. |
 | 5 | no reachable CUDA runtime path on MPS | **DONE** | `grep -rn cuda src/ffsplat/` → 12 hits, all comments/docstrings except `torch.cuda.is_available()` (the availability predicate itself) and one `torch.cuda.synchronize()` inside an `elif device.type == "cuda"` branch. Proven at runtime: with 14 `torch.cuda.*` entry points trapped to raise, an MPS run of device resolution + PLY decode + `view.render_fn` + `eval.rasterize_splats` reported **0 trapped calls**. |
-| 6 | fork README: Apple Silicon section + measured timings | **DONE** | `README.md` §"Apple Silicon (MPS) support": install, what works/doesn't, and M1 Max timings in seconds (raster call 5.73 s cold / 1.72 s warm; PLAS 5.1/21.6/50.4 s cpu vs 29.8/64.3/129.0 s mps; full-size encode 663.8 s mps / 863.6 s cpu). |
+| 6 | fork README: Apple Silicon section + measured timings | **DONE, revised in Phase B** | `README.md` §"Apple Silicon (MPS) support" now carries a stage-by-stage device policy, a parity-vs-CPU table for all 7 profiles, and re-measured timings: raster **0.09 s cold / 0.033 s warm on the Metal kernels** (the earlier 5.73/1.72 s were the *fallback* path), PLAS 55.7 s cpu vs **30.4 s mps** at 512² and 621.6 s vs **278.7 s** at the real 1594² grid, k-means 105.8→66.4 s cpu / 68.2→**22.3 s** mps, full-size encode **324.8 s mps** vs the 425.8 s baseline and 863.6 s cpu. |
 | 7 | small commits, no force-push | **DONE** | 7 commits on `apple-silicon` (§7), pushed to the fork only; never force-pushed, never opened upstream. |
 
 ---
@@ -106,8 +109,10 @@ sha256 in PROGRESS.md §0.3). The `eval` command needs them.
 - **`uint16`/`uint32` are not representable on MPS.** The SOG codecs use them only as intermediate
   carriers while splitting a value into bytes, so `ffsplat.device.encoding_dtype` substitutes
   `int32`/`int64` on MPS only. Byte-identical output, but it is a backend limitation.
-- **MPS is slower than CPU for PLAS** at the SOG grid sizes (29.8 s vs 5.1 s at 256²); the full-size
-  encode is therefore faster with `--device cpu`.
+- **[Phase B] PLAS is NOT slower on MPS.** The earlier claim came from a 2-channel *random* grid; the SOG
+  templates feed PLAS a real 6-channel grid, and on that input MPS is **1.8x faster at 512² (30.4 s vs
+  55.7 s) and 2.2x faster at the real 1594² grid (278.7 s vs 621.6 s)**. The full-size encode is faster on
+  MPS at every stage except the `SOG-PlayCanvas` manhattan k-means (see the new gaps below).
 - **`torch` had to be bumped** from the pinned `2.6.0` to `2.14.1`: the vendored MPS rasterizer needs
   `torch.mps.compile_shader`, absent in 2.6.0. Stage-1 convert was validated on 2.6.0 first.
 - **`ffsplat live` was launched as a real process and its Convert button was driven through the GUI**; the
@@ -117,9 +122,28 @@ sha256 in PROGRESS.md §0.3). The `eval` command needs them.
   not finished when the ~30 min best-effort budget expired, so no container was written for it and the
   process was stopped. `live`'s `live preview` checkbox and its Evaluation tab were **not** driven through
   the GUI; the functions behind them are the same `convert`/`eval` code paths verified from the CLI.
-- **Only `SOG-web` encode and `smurfx → 3DGS-INRIA-ply` decode were validated.** The other profiles
-  (`SOG-PlayCanvas`, `SOG-web-png`, `SOG-web-nosh`, `SOG-web-sh-split`, `3DGS-INRIA-nosh-ply`) still use
-  the same code paths and the same pure-PyTorch k-means, but were **not** individually run.
+- **[Phase A] All 7 profiles are now individually run on both devices** (202² and 512² real-truck scenes),
+  decoded back where the format allows, and compared order-independently: all pass their codec-derived
+  budgets. Four device-independent template bugs were found and fixed (SOG-web-nosh and
+  3DGS-INRIA-nosh-ply split `sh` with `[1]` where `[1, 15]` is required; SOG-web-sh-split used
+  `to_fields:` instead of `to_field:`; SOG-PlayCanvas' fixed codebook texture needs >= 65536
+  primitives) — each with a regression test in `tests/test_format_profiles.py`.
+- **[Phase A] Three further device-independent codec defects are reported, not fixed**: `SOG-web-nosh`
+  and `SOG-web-sh-split` write `f_dc` as a 3-pixel-wide AVIF with `chroma: 420` (f_dc error 0.9956 vs
+  0.0417/0.0184 for the 444 profiles); a `SOG-web-nosh` container cannot be re-encoded through
+  `ffsplat convert` (its `sh` is width 1, every PLY profile splits 16); and SOG-PlayCanvas quaternions are
+  lossy for the ~9% of primitives whose `|w|` is not the largest component.
+- **[Phase B] The raster timings recorded in Stage 0/3 were measured through mpsplat's torch fallback**
+  (`gate_render.py` passed `backgrounds=`), not the Metal kernels: 5.13 s cold / 1.69 s warm is the
+  fallback, **0.09 s / 0.033 s is the Metal path** (44.8x). `eval` used that fallback too whenever a
+  white background was requested; it now composites afterwards and stays on Metal —
+  `tests/test_metal_path.py` fails if any of the three render entry points leaves the Metal kernels.
+- **[Phase B] `SOG-PlayCanvas` is the one profile that can be slower on MPS than on CPU** (its `manhattan`
+  k-means: 48.0 s vs 38.2 s per assignment pass, because L1 has no matmul identity and MPS reaches ~25% of
+  its bandwidth on the blocked subtraction). A fused L1+argmin Metal kernel would be needed.
+- **[Phase B] PLAS is 86% of the full-size encode (291.5 s of 339.4 s)** and is at its ceiling for this
+  stack: the cost is upstream `plas`'s per-iteration `.item()` sync (5398 of the encode's 5469 host syncs),
+  and patching a PyPI wheel would not survive a clean clone.
 - **SOG output is not reproducible run-to-run** — upstream, not a port issue: ffsplat calls
   `sort_with_plas` without a `seed`, and PLAS then consumes unseeded `np.random.randint` block shifts and
   `torch.randperm`. Two identical CPU invocations produced different container bytes (PROGRESS.md §1.8).
@@ -127,7 +151,7 @@ sha256 in PROGRESS.md §0.3). The `eval` command needs them.
 - **`pre-commit run -a` was not run** — its `ruff --fix`/`prettier` hooks rewrite files (they silently
   rewrote two unrelated upstream files, reverted in `b807068`). The tools `make check` delegates to
   (`ruff --no-fix`, `ruff format --check`, `mypy`, `deptry`) were all run instead and are clean.
-- **The eval metrics** come from the container the MPS convert produced: `PSNR 24.295, SSIM 0.8461, LPIPS 0.184`, `0.106 s/image`, 2,540,836 Gaussians, 31.466 MB — i.e. the MPS render agrees with the real photographs (the 3DGS paper reports ~25.2 dB for truck).
+- **The eval metrics** come from the container the MPS convert produced: `PSNR 24.295, SSIM 0.8461, LPIPS 0.184`, 0.045 s/image, 2,540,836 Gaussians, ~31.45 MB — i.e. the MPS render agrees with the real photographs (the 3DGS paper reports ~25.2 dB for truck). The metrics are identical after the Phase-B k-means change; the 0.106 s/image figure quoted earlier was taken on a loaded machine and is not attributable to any code change (a COLMAP dataset has `white_background = False`, so `eval` was already on the Metal path).
 - `nvidia-ncore`, `imagecodecs` and the `viser` fork's other optional extras were not needed and are not
   installed.
 
@@ -151,6 +175,8 @@ sha256 in PROGRESS.md §0.3). The `eval` command needs them.
 | `vendor/mpsplat/VENDOR.md` | provenance of the vendored MPS rasterizer |
 
 ## 7. Commits on `apple-silicon`
+
+Phase A/B review commits are listed at the end of `PROGRESS.md`; the list below is the original port.
 
 ```
 01bb110 Stage 0: PROGRESS.md with F1/F2/F3 evidence + F4 gate decision (MPS gate PASS)
