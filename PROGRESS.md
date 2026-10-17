@@ -1976,6 +1976,32 @@ e812996 PROGRESS B2.1: PLAS stays on MPS -- measured, not assumed
 6180f93 docs: README device policy + parity table + re-measured timings, MORNING_REPORT revisions
 ```
 
+That block is not a hand-kept list: it is the literal output of `git log --oneline ec2ab21..HEAD | cat`
+at `git rev-parse HEAD` = `94392beda13dd926f9472e76f55554fbc0b99fe7` — **17 commits** — reproduced here in full:
+
+```
+94392be docs: point the fork URLs at HenryGetz/ffsplat-mps (keeping the historical log verbatim)
+cd6afa7 PROGRESS/README: resolve the SOG-web-sh-split f_dc FAIL with a control experiment
+a66d6cb PROGRESS: commit list and the acceptance checklist for this review
+6180f93 docs: README device policy + parity table + re-measured timings, MORNING_REPORT revisions
+571fe3f PROGRESS: Phase B2.2-B2.6 and B3/B4 (measured before/after, stage attribution, gaps)
+20d3dad device: announce the one remaining silent Metal fallback (SH degree > 4)
+1cee426 k-means: fused cdist per centroid block for the manhattan metric
+0d4181a tests: guard that ffsplat's renders stay on mpsplat's Metal kernels
+1e2d0a1 k-means: use torch.cdist for the euclidean metric (3.1x faster on MPS)
+e812996 PROGRESS B2.1: PLAS stays on MPS -- measured, not assumed
+cb95c17 Phase B1: stage-timing breakdown (cpu + mps) and ruff-clean test file
+bc65ef3 eval: keep the Metal rasterizer path when a white background is used
+18b5880 Phase A1-A3: per-profile parity matrix, mpsplat skip audit, independent rasterizer reference
+d15812b Document + name SOG-PlayCanvas's full-codebook requirement
+3d7f72a Fix SOG-web-sh-split: sort target field is 'to_field', not 'to_fields'
+d6c34c0 Fix 3DGS-INRIA-nosh-ply: same [1] vs [1, 15] sh split bug
+b960016 Fix SOG-web-nosh: the sh split must cover all 16 coefficients
+```
+
+(The commit that adds this paragraph is the 18th; a file cannot contain its own hash, so it is the one
+commit of this review that is not in the list above.)
+
 Pushed to `fork` = `https://github.com/HenryGetz/ffsplat-mps.git`, branch `apple-silicon`. Never pushed
 upstream, never force-pushed. Harnesses and logs used for every number live outside the repo in
 `ffsplat-fixtures/` (`profile_matrix.py`, `matrix_report.py`, `rasterizer_reference_check.py`,
@@ -1991,7 +2017,7 @@ upstream, never force-pushed. Harnesses and logs used for every number live outs
 | no silent performance fallbacks on hot paths | done | `eval` composited `backgrounds` (B2.3, 44.8x measured); `tests/test_metal_path.py` traps all three torch fallbacks and pins `tile_size`/`backgrounds`/`masks`/`rasterize_mode`/SH degree; the SH-degree>4 fallback is the one that cannot be avoided and is now warned about |
 | full-size MPS encode beats the CPU baseline with per-stage attribution | done | 324.8 s vs 863.6 s CPU (baseline) and vs 425.8 s MPS (baseline); attribution PLAS 291.5 / k-means 42.9 / images 4.8 / quantise 0.13 (B3) |
 | GPU-utilisation evidence per stage | done | k-means 99.7%, PLAS 84.6%, image encoding 26.7% (CPU-bound), whole run 88.2% (B3) |
-| all seven profiles' parity resolved | done | A1.3 (202²) and A1.5 (512²), all PASS; four template bugs fixed with tests; three device-independent codec defects reported |
+| all seven profiles' parity resolved | done | A1.3 (202²) and A1.5 (512²): every row PASS, with the single over-budget row (`SOG-web-sh-split`'s `f_dc`) resolved by the A1.5a control experiment rather than a threshold; four template bugs fixed with tests; three device-independent codec defects reported |
 | raster cold/warm + eval wall clock | done | 0.09 s cold / 0.033 s warm on Metal (5.13/1.69 s on the fallback); eval 0.045 s/image, metrics identical |
 | upstream tests + mypy/deptry/ruff clean for touched files | done | 23 passed; mypy/deptry/uv lock clean; `ruff check` "All checks passed" on every file touched (the 5 repo-wide findings and 3 format complaints are pre-existing upstream lines) |
 | README + PROGRESS + MORNING_REPORT updated with measured numbers only | done | old numbers kept and labelled baseline |

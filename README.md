@@ -136,17 +136,20 @@ two silently drop rendering onto the torch fallback.
 Every output profile was encoded on both devices from the same real fixtures (202² = 40,804 and
 512² = 262,144 primitives, subsampled from the real INRIA truck model), decoded back, and compared
 **order-independently** (PLAS is called without a seed upstream, so two runs of the same command differ;
-1033-quantile profiles are used, never element-wise). Budgets come from each template's own declared
+1001-quantile profiles are used, never element-wise). Budgets come from each template's own declared
 quantiser. `f_dc_`, `rot_`, `scale_`, `opacity`, `x/y/z` and the `f_rest` codebook all pass, and the
 mean/median error statistics agree between devices:
 
+All rows below are the **512² (262,144-primitive) run**, whose verbatim report is PROGRESS A1.5
+(`matrix_report.py mid512`); delta and budget therefore come from the same run.
+
 | profile | container bytes cpu / mps | cpu-vs-mps worst property delta | budget | verdict |
 |---|---|---|---|---|
-| SOG-web | 4,508,343 / 4,510,184 | `f_rest` 0.0362 (mean/range) | 0.05 | PASS |
-| SOG-web-png | 4,845,133 / 4,847,738 | `f_rest` 0.0362 (mean/range) | 0.05 | PASS |
-| SOG-web-nosh | 2,912,255 / 2,911,156 | `f_dc` 0.0856 | 0.1209 | PASS |
-| SOG-web-sh-split | 5,877,576 / 5,878,134 | `f_dc` 0.2140 (0.0428-0.1712 for the same measurement between four CPU runs) | 0.0951 | PASS by control: the encoder's quantised `f_dc` image is multiset-identical across devices (max abs sorted delta 0); the decoded difference comes only from this profile's lossy `chroma: 420` 3-pixel-wide AVIF — see PROGRESS A1.5a |
-| SOG-PlayCanvas | 5,270,706 / 5,248,634 | `rot` 0.000015 | 0.0118 | PASS |
+| SOG-web | 4,508,343 / 4,510,184 | `f_rest` 0.036184 (mean/range; everything else 0.000000) | 0.05 | PASS |
+| SOG-web-png | 4,845,133 / 4,847,738 | `f_rest` 0.036184 (mean/range; everything else 0.000000) | 0.05 | PASS |
+| SOG-web-nosh | 2,912,255 / 2,911,156 | `f_dc` 0.085588 | 0.120918 | PASS |
+| SOG-web-sh-split | 5,877,576 / 5,878,134 | `f_dc` 0.213970 (0.042794-0.171176 for the same measurement between four CPU runs; everything else 0.000000) | 0.120918 | PASS by control: the encoder's quantised `f_dc` image is multiset-identical across devices (max abs sorted delta 0); the decoded difference comes only from this profile's lossy `chroma: 420` 3-pixel-wide AVIF — see PROGRESS A1.5a |
+| SOG-PlayCanvas | 5,246,358 / 5,187,036 | `rot` 0.000015 | 0.011764 | PASS |
 | 3DGS-INRIA-ply | 61,869,378 / 61,869,378 | 0.000000 | — | PASS (bit-identical) |
 | 3DGS-INRIA-nosh-ply | 14,681,969 / 14,681,969 | 0.000000 | — | PASS (bit-identical) |
 
