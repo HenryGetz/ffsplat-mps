@@ -3,7 +3,8 @@
 Host: Henry's M1 Max MacBook Pro, macOS (darwin 27.0.0), arm64. Local only.
 Agent: ffsplat-apple-mps (sole editing agent).
 Repo: `/Users/henrygetz/Downloads/ffsplat` — upstream https://github.com/w-m/ffsplat @ `3fb6444`
-Branch: `apple-silicon` → pushed to fork `https://github.com/HenryGetz/ffsplat`
+Branch: `apple-silicon` → pushed to fork `https://github.com/HenryGetz/ffsplat-mps` (renamed
+from `HenryGetz/ffsplat` during the Phase A/B review)
 Fixtures: `/Users/henrygetz/Downloads/ffsplat-fixtures` (outside repo).
 
 ---
@@ -35,6 +36,8 @@ github.com
   - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
 $ gh repo fork --remote=false --clone=false     # -> https://github.com/HenryGetz/ffsplat
 $ git remote add fork https://github.com/HenryGetz/ffsplat.git
+# (the fork was renamed to https://github.com/HenryGetz/ffsplat-mps during the Phase A/B review;
+#  the push URL below is the current one)
 $ git push -u fork apple-silicon
  * [new branch]      apple-silicon -> apple-silicon
 branch 'apple-silicon' set up to track 'fork/apple-silicon'.

@@ -1,6 +1,7 @@
 # MORNING_REPORT — ffsplat on Apple Silicon (MPS)
 
-**Branch:** `apple-silicon` (forked to `https://github.com/HenryGetz/ffsplat`, never pushed upstream, never force-pushed)
+**Branch:** `apple-silicon` (forked to `https://github.com/HenryGetz/ffsplat-mps` — renamed from
+`HenryGetz/ffsplat` during the Phase A/B review — never pushed upstream, never force-pushed)
 **Base commit:** `3fb6444c5faed6de9aa55fa2313df6c2a4104193` (upstream `w-m/ffsplat` HEAD, 2025-07-10)
 **Machine:** M1 Max MacBook Pro, 10 CPU cores, 32 GiB unified memory, macOS 27.0.0 (darwin), arm64 — everything below ran locally on this Mac.
 **Verdict:** all three stages completed, and the follow-up review (Phase A: parity, Phase B: performance;
@@ -46,7 +47,7 @@ Everything below is a copy-paste of what was actually run on this Mac.
 
 ```bash
 # ---- install (Apple Silicon, no CUDA toolkit) -------------------------------
-git clone https://github.com/HenryGetz/ffsplat.git && cd ffsplat
+git clone https://github.com/HenryGetz/ffsplat-mps.git && cd ffsplat-mps
 git checkout apple-silicon
 uv sync
 
