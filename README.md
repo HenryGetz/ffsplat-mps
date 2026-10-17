@@ -301,8 +301,9 @@ rasteriser in this branch: the same `rasterization()` call went from 2.018 s (to
 to 0.045 s (Metal, warm) at 978x545 - **44.8x**, on the definitions the timing table above uses - with
 the host-side composite verified equal to the rasteriser's own blend to 1.55e-06.
 
-One-time costs: `uv sync` from a warm uv cache takes ~2.5 s; the first `ffsplat view`/`live` launch
-builds viser's browser client (~45 s, once).
+One-time costs: a re-run of `uv sync` on an already up-to-date environment takes ~2.5 s (a *fresh*
+install is the ~30 s / ~90 s above); the first `ffsplat view`/`live` launch builds viser's browser
+client (~45 s, once).
 
 ### Where MPS is not optimized
 
