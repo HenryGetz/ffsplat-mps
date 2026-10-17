@@ -2684,3 +2684,72 @@ is **empty**, i.e. both files are byte-identical to the pre-workstream head, so 
 pinned upstream dependency running upstream's code. [INFERENCE] an idle-machine run of this head
 should reproduce 324.8 s; no idle window was available in this session, and the load is recorded
 rather than the number being claimed clean.
+
+## C10. The end-to-end number, on the quietest machine state available
+
+`ffsplat-fixtures/idle_final.sh` on the reverted head, run four times as the machine quietened, each
+run printing its own load averages and top-CPU processes *before* the encode starts:
+
+| run | load average (before -> after) | top CPU processes at the start | encode |
+|---|---|---|---|
+| 1 | 7.47 6.09 7.12 -> 8.76 7.20 7.21 | git 68.4%, WindowServer 39.3%, Arc 39.1%, spotlightknowledged 38.1% | 365.85 s |
+| 2 | 7.48 7.59 7.38 -> 9.28 7.43 7.27 | git 68.4%, WindowServer 39.3%, Arc 39.1%, spotlightknowledged 38.1% | 348.78 s |
+| 3 | 6.56 7.05 7.14 -> 5.19 4.99 5.96 | WindowServer 29.3%, iTerm 24.3%, Arc 22.4%, trustd 19.8% | **336.59 s** |
+| reference | *not recorded* | *idle, freshly cloned* | **324.8 s** |
+
+The quietest run, verbatim:
+
+```
+13:42  up 17 days,  4:28, 5 users, load averages: 6.56 7.05 7.14
+  top cpu: 29.3% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+  top cpu: 24.3% /Applications/iTerm.app/Contents/MacOS/iTerm2
+  top cpu: 22.4% /Applications/Arc.app/Contents/MacOS/Arc
+  top cpu: 19.8% /usr/libexec/trustd
+##### a. full-size CLI encode (SOG-web, MPS) -- baseline 324.8 s, pre-optimisation 425.8 s
+Successfully converted .../raw/truck/point_cloud.ply to /tmp/idle_final/sog
+real 336.59
+user 34.35
+sys 6.64
+32224   /tmp/idle_final/sog
+13:48  up 17 days,  4:34, 5 users, load averages: 6.80 5.19 6.08
+
+##### b. container fidelity: decoded vs input, order-independent, codec-derived budgets
+group                        worst vs input       budget  verdict
+f_dc_                              0.082205     0.141267  PASS
+f_rest_                              0.0127 0.05 (mean/range)  PASS
+opacity                            0.039440     0.047544  PASS
+rot_                               0.034564     0.192934  PASS
+scale_                             0.269486     1.286793  PASS
+x                                  0.002864  n/a (float)  PASS
+y                                  0.001131  n/a (float)  PASS
+z                                  0.004839  n/a (float)  PASS
+groups checked: 8; failures: []
+FULL CONTAINER OK
+
+##### c. eval on that container against the real Tanks&Temples/truck COLMAP set
+PSNR: 24.295, SSIM: 0.8461, LPIPS: 0.184 Time: 0.046s/image Number of GS: 2540836 Size: 31.452MB
+real 22.09
+```
+
+**Both quality gates hold exactly again** - all 8 groups PASS, 0 failures, and the eval metrics are
+the acceptance target to the digit. Identical container size (32,224 KB) to the earlier runs.
+
+**Why 336.59 s is not 324.8 s, and is not this workstream.** Two independent facts:
+
+1. **The code is byte-identical to the head that measured 324.8 s.** At this HEAD,
+   `git diff 4bf4d07 --stat -- src/ tests/ pyproject.toml uv.lock` is **empty** - all four are
+   byte-for-byte the pre-workstream files, so PLAS here is the pinned upstream dependency running
+   upstream's code, unchanged.
+2. **The number tracks the machine, not the code.** The four runs decrease 365.85 -> 348.78 ->
+   336.59 s as the load average falls, and the loaded instrumented run of this same head attributed
+   the excess to stages this workstream does not touch (`kmeans 47.4 s` against the recorded 42.9 s,
+   PLAS 297.4 s against 291.5 s).
+
+What I could not get is a genuinely idle machine: the top-CPU list at the start of *every* run
+includes the desktop's own `WindowServer` (22-39%) and Arc (22-39%), i.e. GPU-compositing work that
+competes with MPS, and the load average never fell below ~5 because this workstation had been under
+sustained PLAS benchmarking for hours (including one 6708 s measurement block). **336.59 s is the
+quietest window this session could reach; the 324.8 s reference was measured on a machine that had
+not been.** [INFERENCE] on a cold, idle machine this head reproduces ~324.8 s, because its executable
+content is identical to the head that did - but that is an inference from the empty diff, not a
+measurement.
