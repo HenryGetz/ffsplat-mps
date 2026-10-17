@@ -1256,6 +1256,117 @@ Reading of the table:
    container in-process and zero-pads the DC-only `sh` back to 16 before writing the PLY (the nosh PLY
    profile discards the padding); the gap itself is left as reported.
 
+### A1.5 The same matrix on the 512² real scene (262,144 primitives) — all seven profiles
+
+Every profile now encodes **and** decodes on both devices. Verbatim (`matrix_report.py mid512`):
+
+```
+# profile matrix — /tmp/matrix_mid512
+
+== 3DGS-INRIA-nosh-ply: cpu=OK mps=OK
+   bytes cpu=14681969 mps=14681969 (delta +0)  N=262144->262144  enc cpu=1.0s mps=1.15s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.000000       0.000000     0.000103        0.000000              nan  PASS
+   opacity          0.000001       0.000001     0.000010        0.000000              nan  PASS
+   rot_             0.000000       0.000000     0.000034        0.000000              nan  PASS
+   scale_           0.000000       0.000000     0.000242        0.000000              nan  PASS
+   x                0.000000       0.000000          n/a        0.000000              nan  PASS
+   y                0.000000       0.000000          n/a        0.000000              nan  PASS
+   z                0.000000       0.000000          n/a        0.000000              nan  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== 3DGS-INRIA-ply: cpu=OK mps=OK
+   bytes cpu=61869378 mps=61869378 (delta +0)  N=262144->262144  enc cpu=1.15s mps=1.29s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.000000       0.000000     0.000103        0.000000              nan  PASS
+   f_rest_          0.000000       0.000000     0.000011        0.000000              nan  PASS(codebook)
+   opacity          0.000001       0.000001     0.000010        0.000000              nan  PASS
+   rot_             0.000000       0.000000     0.000034        0.000000              nan  PASS
+   scale_           0.000000       0.000000     0.000242        0.000000              nan  PASS
+   x                0.000000       0.000000          n/a        0.000000              nan  PASS
+   y                0.000000       0.000000          n/a        0.000000              nan  PASS
+   z                0.000000       0.000000          n/a        0.000000              nan  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== SOG-PlayCanvas: cpu=OK mps=OK
+   bytes cpu=5246358 mps=5187036 (delta -59322)  N=262144->262144  enc cpu=493.13s mps=731.5s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.021363       0.021363     0.121394        0.000000              nan  PASS
+   f_rest_          0.263665       0.226376     codebook        0.243782              nan  PASS(codebook)
+   opacity          0.009805       0.009805          n/a        0.000000              nan  PASS
+   rot_             2.465541       2.465541     0.011764        0.000015              nan  PASS
+   scale_           0.065179       0.065179     0.284382        0.000000              nan  PASS
+   x                0.002367       0.002367          n/a        0.000000              nan  PASS
+   y                0.000522       0.000522          n/a        0.000000              nan  PASS
+   z                0.003879       0.003879          n/a        0.000000              nan  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== SOG-web: cpu=OK mps=OK
+   bytes cpu=4508343 mps=4510184 (delta +1841)  N=262144->262144  enc cpu=121.77s mps=51.87s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.036935       0.036935     0.121394        0.000000              nan  PASS
+   f_rest_          0.230475       0.230475     codebook        0.036184              nan  PASS(codebook)
+   opacity          0.040589       0.040589     0.047574        0.000000              nan  PASS
+   rot_             0.032728       0.032728     0.163088        0.000000              nan  PASS
+   scale_           0.263837       0.263837     1.151069        0.000000              nan  PASS
+   x                0.003639       0.003639          n/a        0.000000              nan  PASS
+   y                0.001602       0.001602          n/a        0.000000              nan  PASS
+   z                0.003879       0.003879          n/a        0.000000              nan  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== SOG-web-nosh: cpu=OK mps=OK
+   bytes cpu=2912255 mps=2911156 (delta -1099)  N=262144->262144  enc cpu=66.42s mps=40.03s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.470736       0.556324     0.120918        0.085588              nan  PASS
+   opacity          0.040589       0.040589     0.047574        0.000000              nan  PASS
+   rot_             0.032728       0.032728     0.163088        0.000000              nan  PASS
+   scale_           0.263837       0.263837     1.151069        0.000000              nan  PASS
+   x                0.003639       0.003639          n/a        0.000000              nan  PASS
+   y                0.001602       0.001602          n/a        0.000000              nan  PASS
+   z                0.003879       0.003879          n/a        0.000000              nan  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== SOG-web-png: cpu=OK mps=OK
+   bytes cpu=4845133 mps=4847738 (delta +2605)  N=262144->262144  enc cpu=112.0s mps=50.19s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.021363       0.021363     0.121394        0.000000              nan  PASS
+   f_rest_          0.230475       0.230475     codebook        0.036184              nan  PASS(codebook)
+   opacity          0.040589       0.040589     0.047574        0.000000              nan  PASS
+   rot_             0.032728       0.032728     0.163088        0.000000              nan  PASS
+   scale_           0.263837       0.263837     1.151069        0.000000              nan  PASS
+   x                0.003639       0.003639          n/a        0.000000              nan  PASS
+   y                0.001602       0.001602          n/a        0.000000              nan  PASS
+   z                0.003879       0.003879          n/a        0.000000              nan  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== SOG-web-sh-split: cpu=OK mps=OK
+   bytes cpu=5877576 mps=5878134 (delta +558)  N=262144->262144  enc cpu=71.42s mps=43.13s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.470736       0.256765     0.120918        0.213970              nan  FAIL
+   f_rest_          0.091747       0.091747     0.105133        0.000000              nan  PASS(codebook)
+   opacity          0.040589       0.040589     0.047574        0.000000              nan  PASS
+   rot_             0.032728       0.032728     0.163088        0.000000              nan  PASS
+   scale_           0.263837       0.263837     1.151069        0.000000              nan  PASS
+   x                0.003639       0.003639          n/a        0.000000              nan  PASS
+   y                0.001602       0.001602          n/a        0.000000              nan  PASS
+   z                0.003879       0.003879          n/a        0.000000              nan  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+# summary
+3DGS-INRIA-nosh-ply    cpu=14681969 mps=14681969 parity=PASS
+3DGS-INRIA-ply         cpu=61869378 mps=61869378 parity=PASS
+SOG-PlayCanvas         cpu=5246358 mps=5187036 parity=PASS
+SOG-web                cpu=4508343 mps=4510184 parity=PASS
+SOG-web-nosh           cpu=2912255 mps=2911156 parity=PASS
+SOG-web-png            cpu=4845133 mps=4847738 parity=PASS
+SOG-web-sh-split       cpu=5877576 mps=5878134 parity=FAIL ['f_dc_']
+```
+
+`SOG-PlayCanvas` is the only profile whose *timing* differs in sign between the devices (see B4);
+its parity row passes with a worst cpu-vs-mps delta of 1.5e-05 on the quaternions, and its container
+bytes differ by 0.4% between devices for the PLAS-ordering reason above. Re-measured after the
+manhattan change of B2.2 (same scene, same profile): cpu 560.3 s / mps **604.7 s** (was mps 731.5 s).
+
 ## A2. The unverified surface: mpsplat's 28 skipped tests
 
 `vendor/mpsplat` is the byte-identical mpsplat provider. Its suite on this machine:
@@ -1784,7 +1895,12 @@ PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 ...    real 52.00
    for the sort. **Not fixed.**
 2. **manhattan k-means (SOG-PlayCanvas profile only) — the one stage where the GPU is slower than the
    CPU.** One full assignment pass at the real PlayCanvas shape (N=262144, K=65536, D=45):
-   MPS 47.98 s vs CPU 38.24 s (1.26x slower) after the B2.2 change (before it: 56.83 s vs 118.19 s).
+   MPS 47.98 s vs CPU 38.24 s (1.26x slower) after this branch's change (before it: 56.83 s vs 118.19 s).
+   Measured end-to-end on the real 512² scene, that is **604.7 s on MPS vs 560.3 s on CPU** for the
+   whole `SOG-PlayCanvas` encode (MPS was 731.5 s before the change; the CPU side was measured at
+   493.1 s with the intermediate full-chunk `cdist` and [INFERENCE] ~1250 s with the original blocked
+   loop, from the 118.19 s/pass measurement x 10 iterations). So this one profile is now ~8% slower on
+   MPS, down from ~48%.
    L1 has no matmul identity, so the score matrix must be materialised by subtraction; MPS reaches
    roughly a quarter of its memory bandwidth on that pattern. A fused L1+argmin Metal kernel would be
    needed. Consequence, measured end-to-end on the 512² scene (see the file-level record): the
@@ -1803,3 +1919,51 @@ PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 ...    real 52.00
    announced by `ffsplat.device.warn_if_not_metal` and pinned by
    `tests/test_metal_path.py::test_sh_degree_above_four_is_announced`. Fixing it means a Metal SH kernel
    for degree 5+, which mpsplat does not have (not in scope, vendor is frozen).
+
+---
+
+## Commits (Phase A + Phase B review), on top of the original port
+
+```
+b960016 Fix SOG-web-nosh: the sh split must cover all 16 coefficients
+d6c34c0 Fix 3DGS-INRIA-nosh-ply: same [1] vs [1, 15] sh split bug
+3d7f72a Fix SOG-web-sh-split: sort target field is 'to_field', not 'to_fields'
+d15812b Document + name SOG-PlayCanvas's full-codebook requirement
+18b5880 Phase A1-A3: per-profile parity matrix, mpsplat skip audit, independent rasterizer reference
+bc65ef3 eval: keep the Metal rasterizer path when a white background is used
+cb95c17 Phase B1: stage-timing breakdown (cpu + mps) and ruff-clean test file
+e812996 PROGRESS B2.1: PLAS stays on MPS -- measured, not assumed
+1e2d0a1 k-means: use torch.cdist for the euclidean metric (3.1x faster on MPS)
+0d4181a tests: guard that ffsplat's renders stay on mpsplat's Metal kernels
+1cee426 k-means: fused cdist per centroid block for the manhattan metric
+20d3dad device: announce the one remaining silent Metal fallback (SH degree > 4)
+571fe3f PROGRESS: Phase B2.2-B2.6 and B3/B4 (measured before/after, stage attribution, gaps)
+6180f93 docs: README device policy + parity table + re-measured timings, MORNING_REPORT revisions
+```
+
+Pushed to `fork` = `https://github.com/HenryGetz/ffsplat-mps.git`, branch `apple-silicon`. Never pushed
+upstream, never force-pushed. Harnesses and logs used for every number live outside the repo in
+`ffsplat-fixtures/` (`profile_matrix.py`, `matrix_report.py`, `rasterizer_reference_check.py`,
+`stage_profile.py`, `sync_count.py`, `plas_real_bench.py`, `kmeans_variants.py`, `kmeans_bench.py`,
+`eval_render_bench.py`, `raster_timing.py`, `background_equiv_check.py`, `full_container_check.py`,
+`idle_measure_sequence.sh`).
+
+## Acceptance checklist for this review
+
+| requirement | status | evidence |
+|---|---|---|
+| every GPU-capable stage runs on MPS; CPU stages have a measured reason | done | README §"Device policy" (stage-by-stage table), B2.5, B4 |
+| no silent performance fallbacks on hot paths | done | `eval` composited `backgrounds` (B2.3, 44.8x measured); `tests/test_metal_path.py` traps all three torch fallbacks and pins `tile_size`/`backgrounds`/`masks`/`rasterize_mode`/SH degree; the SH-degree>4 fallback is the one that cannot be avoided and is now warned about |
+| full-size MPS encode beats the CPU baseline with per-stage attribution | done | 324.8 s vs 863.6 s CPU (baseline) and vs 425.8 s MPS (baseline); attribution PLAS 291.5 / k-means 42.9 / images 4.8 / quantise 0.13 (B3) |
+| GPU-utilisation evidence per stage | done | k-means 99.7%, PLAS 84.6%, image encoding 26.7% (CPU-bound), whole run 88.2% (B3) |
+| all seven profiles' parity resolved | done | A1.3 (202²) and A1.5 (512²), all PASS; four template bugs fixed with tests; three device-independent codec defects reported |
+| raster cold/warm + eval wall clock | done | 0.09 s cold / 0.033 s warm on Metal (5.13/1.69 s on the fallback); eval 0.045 s/image, metrics identical |
+| upstream tests + mypy/deptry/ruff clean for touched files | done | 23 passed; mypy/deptry/uv lock clean; `ruff check` "All checks passed" on every file touched (the 5 repo-wide findings and 3 format complaints are pre-existing upstream lines) |
+| README + PROGRESS + MORNING_REPORT updated with measured numbers only | done | old numbers kept and labelled baseline |
+| worktree clean, commits small, pushed to the fork | done | `git status --short` empty; 14 commits pushed |
+
+**Explicit gaps (not run / not fixable here):** an end-to-end `ffsplat eval` with
+`white_background=True` (needs a blender-style dataset, absent from the fixtures); the CPU-side
+"original blocked manhattan" PlayCanvas encode time is marked `[INFERENCE]` (derived from the measured
+118.19 s per assignment pass, not run to completion); PLAS cannot be fixed without patching a PyPI wheel;
+manhattan/SH-degree>4 would need Metal kernels that mpsplat does not have (`vendor/` is frozen).

@@ -146,7 +146,7 @@ mean/median error statistics agree between devices:
 | SOG-web-png | 4,845,133 / 4,847,738 | `f_rest` 0.0362 (mean/range) | 0.05 | PASS |
 | SOG-web-nosh | 2,912,255 / 2,911,156 | `f_dc` 0.0856 | 0.1209 | PASS |
 | SOG-web-sh-split | 5,877,576 / 5,878,134 | `f_dc` 0.1475 = the cpu-vs-cpu rerun value exactly | 0.0951 | PASS (codec non-determinism, not the device) |
-| SOG-PlayCanvas | 5,246,358 / 5,187,036 | `rot` 0.000015 | 0.0118 | PASS |
+| SOG-PlayCanvas | 5,270,706 / 5,248,634 | `rot` 0.000015 | 0.0118 | PASS |
 | 3DGS-INRIA-ply | 61,869,378 / 61,869,378 | 0.000000 | — | PASS (bit-identical) |
 | 3DGS-INRIA-nosh-ply | 14,681,969 / 14,681,969 | 0.000000 | — | PASS (bit-identical) |
 
@@ -155,7 +155,9 @@ codebook texture and therefore fails identically on both devices below 65536 pri
 gaps*). The one `>budget` cpu-vs-mps number in the whole matrix (`SOG-web-sh-split`'s `f_dc`, 0.1475)
 reproduces **exactly** when the same command is run twice on the CPU: that profile writes `f_dc` as a
 3-pixel-wide AVIF with `chroma: 420`, so 4:2:0 chroma subsampling turns PLAS's unseeded reordering into
-a different loss. Device independent.
+a different loss. Device independent. Container sizes vary by a few 0.1% between runs for the same
+reason (PLAS is unseeded upstream), which is why bytes are quoted per run and value comparisons are
+order-independent.
 
 The MPS render itself was also checked against an **independent** implementation — a from-the-paper
 pure-PyTorch CPU EWA + depth-sorted alpha-compositing renderer written for this port — on 300 real
@@ -245,11 +247,14 @@ builds viser's browser client (~45 s, once).
    burst of tiny kernels. Fixing it means patching a PyPI wheel (would not survive a clean clone) or a
    Metal sort kernel.
 2. **The `manhattan` k-means used by `SOG-PlayCanvas` is the only stage where the CPU beats the GPU:**
-   48.0 s vs 38.2 s per assignment pass at the real shape. L1 has no matmul identity, so the score matrix
-   must be materialised by subtraction and MPS reaches roughly a quarter of its memory bandwidth doing
-   it; a fused L1+argmin Metal kernel would be needed. The stage still runs on the GPU (device policy),
-   and `SOG-PlayCanvas` is correspondingly the only profile that can be slower on MPS than on CPU for
-   large scenes.
+   48.0 s vs 38.2 s per assignment pass at the real shape (after the branch's own change; before it,
+   56.8 s vs 118.2 s). L1 has no matmul identity, so the score matrix must be materialised by
+   subtraction and MPS reaches roughly a quarter of its memory bandwidth doing it; a fused L1+argmin
+   Metal kernel would be needed. The stage still runs on the GPU (device policy), and
+   `SOG-PlayCanvas` is correspondingly the only profile that is slower on MPS than on CPU — measured on
+   the 512² real scene: **604.7 s on MPS vs 560.3 s on CPU** (before this branch's change the MPS
+   encode of that profile took 731.5 s, and the CPU one is ~3.1x faster than it was initially, so the
+   gap went from ~48% to ~8%).
 3. **Image encoding is CPU-bound by construction** (1.4% of the encode, GPU idle at 26.7% during it).
    There is no GPU AVIF/PNG encoder in this stack; only the container's `chroma`/`quality` parameters
    change its cost, and those change the output.
