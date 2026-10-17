@@ -44,6 +44,16 @@ def _synthetic_scene(n: int = N) -> Gaussians:
     )
 
 
+def _ply_properties(path: Path) -> list[str]:
+    """The vertex property names of a binary little-endian PLY, in file order."""
+    with path.open("rb") as f:
+        header = b""
+        while b"end_header" not in header:
+            header += f.readline()
+    return [line.split()[-1] for line in header.decode().splitlines()
+            if line.startswith("property float ")]
+
+
 def _roundtrip(tmp_path: Path, output_format: str) -> Gaussians:
     """Encode with ``output_format``, decode the container back, return the decoded scene."""
     out = tmp_path / output_format
@@ -75,3 +85,17 @@ def test_sog_web_nosh_encodes_and_decodes(tmp_path: Path) -> None:
     decoded = decode_gaussians(out, "smurfx", verbose=False)
     assert decoded.num_gaussians == 961
     assert decoded.sh.data.shape == (961, 1, 3)
+
+
+def test_3dgs_inria_nosh_ply_writes_only_the_dc_coefficients(tmp_path: Path) -> None:
+    """The no-SH PLY profile drops f_rest; the same [1] vs [1, 15] split bug hit this file."""
+    out = tmp_path / "ply_nosh"
+    encode_gaussians(_synthetic_scene(), out, "3DGS-INRIA-nosh-ply", False)
+    props = _ply_properties(out / "point_cloud.ply")
+    assert sorted(props) == sorted(["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "rot_0", "rot_1",
+                                    "rot_2", "rot_3", "scale_0", "scale_1", "scale_2", "opacity"])
+    # and it must decode again through the matching 3DGS-INRIA-nosh decoding template
+    # the PLY profiles do not sort/prune, so the primitive count is unchanged
+    decoded = decode_gaussians(out / "point_cloud.ply", "3DGS-INRIA-nosh.ply", verbose=False)
+    assert decoded.num_gaussians == N
+    assert decoded.sh.data.shape == (N, 1, 3)
