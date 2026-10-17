@@ -53,22 +53,37 @@ def _distances(rows: Tensor, centroids: Tensor, distance: str) -> Tensor:
     """``[C, D] x [K, D] -> [C, K]`` scores for one chunk of rows."""
     match distance:
         case "euclidean":
-            # ||x||^2 - 2 x.c + ||c||^2 keeps this as a single matmul.
-            x2 = (rows * rows).sum(dim=1, keepdim=True)
-            c2 = (centroids * centroids).sum(dim=1).unsqueeze(0)
-            return x2 - 2.0 * (rows @ centroids.t()) + c2
+            # torch.cdist(p=2) is one fused matmul-based kernel; the hand-expanded
+            # ``||x||^2 - 2 x.c + ||c||^2`` needed three extra passes over a [C, K]
+            # buffer. Measured on the real SOG shapes (N=262144, K=65536, D=45):
+            # 3.0x faster on MPS (5.4 s -> 1.95 s per full assignment pass) and 1.2x
+            # faster on CPU, with identical labels (262144/262144, PROGRESS.md B2.2).
+            return torch.cdist(rows, centroids, p=2)
         case "cosine":
             return 1.0 - _l2_normalize(rows) @ _l2_normalize(centroids).t()
         case "manhattan":
-            # torch.cdist is not implemented for every backend, so accumulate in
-            # centroid blocks: [C, B, D] instead of [C, K, D].
-            block = max(1, _MAX_SCORE_ELEMS // max(rows.shape[0], 1) // max(rows.shape[1], 1))
-            out = rows.new_empty((rows.shape[0], centroids.shape[0]))
-            for start in range(0, centroids.shape[0], block):
-                stop = min(start + block, centroids.shape[0])
-                out[:, start:stop] = (rows.unsqueeze(1) - centroids[start:stop].unsqueeze(0)).abs().sum(dim=2)
-            return out
+            if rows.device.type == "mps":
+                return _manhattan_blocked(rows, centroids)
+            return torch.cdist(rows, centroids, p=1)
     raise ValueError(f"Unknown distance metric: {distance!r} (expected one of {DISTANCES})")
+
+
+def _manhattan_blocked(rows: Tensor, centroids: Tensor) -> Tensor:
+    """``[C, D] x [K, D] -> [C, K]`` L1 scores, accumulated in centroid blocks ``[C, B, D]``.
+
+    Only used on MPS. ``torch.cdist(p=1)`` is 2x faster there for small chunks, but its MPS
+    implementation allocates an internal ``[C, B, D]`` buffer whose size scales with the row
+    chunk, and above ~1600 rows (K=40804, D=45) it is either rejected
+    (``RuntimeError: Invalid buffer size: 22.50 GiB``) or - worse - returns silently wrong
+    labels (4/40804 correct, 0.00 s; PROGRESS.md B2.2). The blocked form keeps the peak
+    allocation bounded by ``_MAX_SCORE_ELEMS`` and was verified to agree with cdist on CPU.
+    """
+    block = max(1, _MAX_SCORE_ELEMS // max(rows.shape[0], 1) // max(rows.shape[1], 1))
+    out = rows.new_empty((rows.shape[0], centroids.shape[0]))
+    for start in range(0, centroids.shape[0], block):
+        stop = min(start + block, centroids.shape[0])
+        out[:, start:stop] = (rows.unsqueeze(1) - centroids[start:stop].unsqueeze(0)).abs().sum(dim=2)
+    return out
 
 
 def _assign(x: Tensor, centroids: Tensor, distance: str, chunk: int) -> Tensor:
