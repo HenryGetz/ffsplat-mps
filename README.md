@@ -41,6 +41,9 @@ git clone https://github.com/w-m/ffsplat.git
 cd ffsplat
 ```
 
+(Apple Silicon: clone `https://github.com/HenryGetz/ffsplat-mps` instead and skip `make install` -
+`uv sync` is the whole install; see [Apple Silicon (MPS) support](#apple-silicon-mps-support).)
+
 Set up the virtual environment with uv:
 
 ```bash
@@ -86,8 +89,8 @@ uv run ffsplat convert --help
 
 Requires **macOS 13+ (Apple Silicon)**, **uv >= 0.4** (the install uses `[tool.uv] override-dependencies`),
 and **Python 3.12-3.13**; `torch 2.14.1` (on Apple Silicon; every other platform keeps upstream's
-`2.6.0`) is pinned and installed by `uv sync`. A cold install takes
-about 30 s on a warm network and needs no local files or paths.
+`2.6.0`) is pinned and installed by `uv sync`. A full install needs no local files or paths: ~30 s with
+a warm uv cache, ~90 s with a cold one on this machine (measured on a fresh clone).
 
 > Don't have a PLY to try? Any 3D Gaussian Splatting `.ply` works, e.g. one of the pretrained
 > [INRIA](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) or
