@@ -1044,3 +1044,315 @@ recorded explicitly):
 | `live_mps_convert_completed_tiny.png` | 1600x1125 | 0.3955 | 0.6764 | `rendered_3d_scene` (p=1.0), `yes_controls_visible` (p=1.0) |
 
 The live server processes were stopped afterwards; port 8080 is free and no `ffsplat live` process remains.
+
+---
+
+# Phase A — PARITY ("does it fully work the same?")
+
+Harnesses added for this phase (outside the repo, in `ffsplat-fixtures/`):
+
+| file | purpose |
+|---|---|
+| `profile_matrix.py` | A1: encode+decode one output profile on one device, record container bytes/file hashes and the order-independent error profile |
+| `matrix_report.py` | A1: cpu-vs-mps parity table, incl. a **cpu-vs-cpu(2nd run) noise floor** |
+| `make_subsample.py` | real-truck subsample fixtures (`raw/truck/point_cloud_512.ply` = 262 144, `_1024.ply` = 1 048 576 primitives) |
+| `rasterizer_reference_check.py` | A3: independent pure-PyTorch CPU rasterizer reference |
+| `stage_profile.py` | B1: in-process per-transformation stage timing + `ioreg` GPU-utilisation sampling |
+
+Order-independence is mandatory and was honoured everywhere: PLAS is called without a seed upstream, so
+two runs of the *same* command on the *same* device differ (PROGRESS §1.8). Every value comparison is a
+1001-quantile profile, never element-wise.
+
+## A1. Per-profile matrix, both devices, on the REAL fixtures
+
+### A1.1 The profiles
+
+`src/ffsplat/conf/format/` contains exactly 7 output profiles:
+
+| profile | file | container | structure |
+|---|---|---|---|
+| SOG-web | `SOG-web.yaml` | avif | means 16-bit, f_dc 8-bit, f_rest = 65536-entry euclidean codebook (16-bit labels), rot/scale/opacity 6-bit |
+| SOG-web-png | `SOG-web-png.yaml` | png | as SOG-web, PNG images |
+| SOG-web-nosh | `SOG-web-nosh.yaml` | avif | as SOG-web but **shN dropped** (DC only) |
+| SOG-web-sh-split | `SOG-web-sh-split.yaml` | avif | f_rest quantised 5-bit and split into 15 per-coefficient images, no codebook |
+| SOG-PlayCanvas | `SOG-PlayCanvas.yaml` | webp | means 16-bit, scales uint8, quats unit-sphere+8-bit, sh0+opacity fused into one 8-bit image, shN = 65536-entry **manhattan** codebook packed into a 1024x960 RGB texture |
+| 3DGS-INRIA-ply | `3DGS-INRIA-ply.yaml` | ply | float32, lossless structural round trip |
+| 3DGS-INRIA-nosh-ply | `3DGS-INRIA-nosh-ply.yaml` | ply | float32, f_rest dropped |
+
+### A1.2 The five real failures found by running them (all device-independent)
+
+Running every profile on the real 202² truck scene (`raw/truck_tiny202.ply`, 40 804 primitives)
+immediately surfaced five device-independent defects — four of them template bugs, all reproduced
+*identically* on `--device cpu` and `--device mps`:
+
+```
+SOG-web-nosh (cpu AND mps: encode):
+    File "src/ffsplat/models/transformations.py", line 232, in apply
+      chunks = field_data.split(split_size_or_sections, dim)
+  RuntimeError: split_with_sizes expects split_sizes to sum exactly to 16 (input tensor's size at
+  dimension 1), but got split_sizes=[1]
+
+3DGS-INRIA-nosh-ply (cpu AND mps: encode):
+  RuntimeError: split_with_sizes expects split_sizes to sum exactly to 16 (input tensor's size at
+  dimension 1), but got split_sizes=[1]
+
+SOG-web-sh-split (cpu AND mps: encode):
+    File "src/ffsplat/models/transformations.py", line 743, in apply
+      to_field_name = params["to_field"]
+  KeyError: 'to_field'
+
+SOG-PlayCanvas (cpu AND mps, tiny scene only: encode, after 169.5 s cpu / 135.6 s mps of work):
+    File "src/ffsplat/models/transformations.py", line 571, in apply
+      field_data = field_data.reshape(*shape)
+  RuntimeError: shape '[-1, 960, 3]' is invalid for input of size 1836180
+```
+
+(plus a fifth, found while decoding: a `SOG-web-nosh` container cannot be re-encoded by the shipped PLY
+profiles — see A1.5.)
+
+All four are fixed in four separate commits (`b960016`, `d6c34c0`, `3d7f72a`, `d15812b`), each with a
+regression test in `tests/test_format_profiles.py` that drives the real template machinery with a
+synthetic 3DGS scene in the INRIA PLY field layout (`sh` of shape `[N,16,3]`, degree 3) — no fixture
+outside the repo is needed, so the tests run in CI:
+
+```
+$ .venv/bin/python -m pytest tests/test_format_profiles.py -q --no-header
+6 passed, 73 warnings in 3.89s
+```
+
+### A1.3 The parity table (real 202² truck scene, 40 804 primitives, both devices)
+
+`profile_matrix.py` encodes each profile with `--device <dev>`, records the container bytes/file hashes,
+decodes back to a PLY, and `matrix_report.py` compares — order-independently — (A) decoded(cpu) vs
+decoded(mps), (B) each decoded scene vs the input, and (C) **decoded(cpu, 2nd run) vs decoded(cpu, 1st
+run)** as the run-to-run noise floor. Budgets are derived from each template's declared quantiser
+(bit depth per property group; for the PlayCanvas opacity/sh0 image from the channelwise min/max recorded
+in `container_meta.yaml`). `PASS(rerun noise)` means two runs of the *same device* differ by as much as
+cpu-vs-mps — i.e. the difference is the codec's own non-determinism, not the port.
+
+```
+$ .venv/bin/python matrix_report.py tiny_fix tiny_fix2      # verbatim (ffsplat-fixtures/)
+== 3DGS-INRIA-nosh-ply: cpu=OK mps=OK
+   bytes cpu=2286928 mps=2286928 (delta +0)  N=40804->40804  enc cpu=1.1s mps=1.15s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.000000       0.000000     0.000081        0.000000         0.000000  PASS
+   opacity          0.000001       0.000001     0.000010        0.000000         0.000000  PASS
+   rot_             0.000000       0.000000     0.000030        0.000000         0.000000  PASS
+   scale_           0.000000       0.000000     0.000209        0.000000         0.000000  PASS
+   x                0.000000       0.000000          n/a        0.000000         0.000000  PASS
+   y                0.000000       0.000000          n/a        0.000000         0.000000  PASS
+   z                0.000000       0.000000          n/a        0.000000         0.000000  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'opacity', 'rot_', 'x', 'y', 'z']
+
+== 3DGS-INRIA-ply: cpu=OK mps=OK
+   bytes cpu=9633137 mps=9633137 (delta +0)  N=40804->40804  enc cpu=1.11s mps=1.2s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.000000       0.000000     0.000081        0.000000         0.000000  PASS
+   f_rest_          0.000000       0.000000     0.000008        0.000000         0.000000  PASS(codebook)
+   opacity          0.000001       0.000001     0.000010        0.000000         0.000000  PASS
+   rot_             0.000000       0.000000     0.000030        0.000000         0.000000  PASS
+   scale_           0.000000       0.000000     0.000209        0.000000         0.000000  PASS
+   x                0.000000       0.000000          n/a        0.000000         0.000000  PASS
+   y                0.000000       0.000000          n/a        0.000000         0.000000  PASS
+   z                0.000000       0.000000          n/a        0.000000         0.000000  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'x', 'y', 'z']
+
+== SOG-web: cpu=OK mps=OK
+   bytes cpu=1178135 mps=1177421 (delta -714)  N=40804->40804  enc cpu=21.08s mps=17.1s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.041730       0.041730     0.095852        0.000000         0.000000  PASS
+   f_rest_          0.226940       0.226940     codebook        0.054536         0.000000  PASS(codebook)
+   opacity          0.040699       0.040699     0.047571        0.000000         0.000000  PASS
+   rot_             0.029818       0.029818     0.142421        0.000000         0.000000  PASS
+   scale_           0.254005       0.254005     0.996627        0.000000         0.000000  PASS
+   x                0.004898       0.004898          n/a        0.000000         0.000000  PASS
+   y                0.001000       0.001000          n/a        0.000000         0.000000  PASS
+   z                0.003895       0.003895          n/a        0.000000         0.000000  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== SOG-web-nosh: cpu=OK mps=OK
+   bytes cpu=498971 mps=499030 (delta +59)  N=40804->40804  enc cpu=12.13s mps=10.36s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.995600       0.995600     0.095100        0.083263         0.036874  PASS
+   opacity          0.040699       0.040699     0.047571        0.000000         0.000000  PASS
+   rot_             0.029818       0.029818     0.142421        0.000000         0.000000  PASS
+   scale_           0.254005       0.254005     0.996627        0.000000         0.000000  PASS
+   x                0.004898       0.004898          n/a        0.000000         0.000000  PASS
+   y                0.001000       0.001000          n/a        0.000000         0.000000  PASS
+   z                0.003895       0.003895          n/a        0.000000         0.000000  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== SOG-web-png: cpu=OK mps=OK
+   bytes cpu=1308890 mps=1307869 (delta -1021)  N=40804->40804  enc cpu=24.08s mps=16.56s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.018411       0.018411     0.095852        0.000000         0.000000  PASS
+   f_rest_          0.226940       0.226940     codebook        0.054536         0.000000  PASS(codebook)
+   opacity          0.040699       0.040699     0.047571        0.000000         0.000000  PASS
+   rot_             0.029818       0.029818     0.142421        0.000000         0.000000  PASS
+   scale_           0.254005       0.254005     0.996627        0.000000         0.000000  PASS
+   x                0.004898       0.004898          n/a        0.000000         0.000000  PASS
+   y                0.001000       0.001000          n/a        0.000000         0.000000  PASS
+   z                0.003895       0.003895          n/a        0.000000         0.000000  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+== SOG-web-sh-split: cpu=OK mps=OK
+   bytes cpu=1033144 mps=1032754 (delta -390)  N=40804->40804  enc cpu=13.37s mps=10.75s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.995600       0.848104     0.095100        0.147496         0.147496  PASS(rerun noise)
+   f_rest_          0.089436       0.089436     0.078928        0.000000         0.000000  PASS(codebook)
+   opacity          0.040699       0.040699     0.047571        0.000000         0.000000  PASS
+   rot_             0.029818       0.029818     0.142421        0.000000         0.000000  PASS
+   scale_           0.254005       0.254005     0.996627        0.000000         0.000000  PASS
+   x                0.004898       0.004898          n/a        0.000000         0.000000  PASS
+   y                0.001000       0.001000          n/a        0.000000         0.000000  PASS
+   z                0.003895       0.003895          n/a        0.000000         0.000000  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+
+# summary
+3DGS-INRIA-nosh-ply    cpu=2286928 mps=2286928 parity=PASS
+3DGS-INRIA-ply         cpu=9633137 mps=9633137 parity=PASS
+SOG-web                cpu=1178135 mps=1177421 parity=PASS
+SOG-web-nosh           cpu=498971 mps=499030 parity=PASS
+SOG-web-png            cpu=1308890 mps=1307869 parity=PASS
+SOG-web-sh-split       cpu=1033144 mps=1032754 parity=PASS
+```
+
+Reading of the table:
+
+* **means / rot / scale / opacity are bit-identical across devices** for every SOG profile (cpu-vs-mps
+  delta 0.000000 at the 6-decimal print precision) — the whole quantise → byte-split → image path is
+  device-independent.
+* `f_rest` differs only inside the k-means codebook (SOG-web/-png: 0.0545 max, 0.00022 mean/range against
+  a 0.05 mean/range budget; the same numbers on cpu and mps when compared to the input) — expected: an
+  argmin tie in the Lloyd iterations can flip a label, and the two devices' matmul accumulation order
+  differs. It is far inside the codec budget.
+* The only >budget cpu-vs-mps number in the whole matrix is `SOG-web-sh-split`'s `f_dc_` (0.147496), and
+  the **cpu-vs-cpu rerun gives exactly the same 0.147496** — that profile writes f_dc as a 3-px-wide
+  AVIF with `chroma: 420`, so 4:2:0 chroma subsampling reorders the loss, and PLAS's unseeded shuffling
+  changes that loss run to run. Not a device effect.
+
+### A1.4 Codec defects found by the matrix (device-independent, reported not silently changed)
+
+1. **`SOG-web-nosh` and `SOG-web-sh-split` destroy `f_dc` with 4:2:0 chroma subsampling.** Both write
+   f_dc with `image_codec: avif, quality: 100, chroma: 420` from a 3-pixel-wide image (`[N,3]`), i.e. the
+   chroma planes are subsampled below one sample per primitive. Measured: `f_dc` error vs the input is
+   **0.9956** for SOG-web-nosh and **0.9956** for SOG-web-sh-split, versus **0.0417** for SOG-web and
+   **0.0184** for SOG-web-png, which use `chroma: 444` / `quality: -1`. In the 3DGS RGB mapping
+   (`rgb = 0.5 + 0.282 * f_dc`) that is a ~0.28 full-scale colour error, on both devices identically.
+   **Not changed**: `chroma` is a declared parameter of the external SOG layout, so switching it is a
+   format-compatibility decision, not a port fix; the numbers are recorded here instead.
+2. **`SOG-PlayCanvas` needs the full 65536-entry codebook.** Its reshape is a fixed 1024x960 RGB texture
+   (64 clusters x 45 coefficients per row), while `KMeans` clamps `n_clusters` to the sample count, so
+   any scene with fewer than 65536 primitives cannot be packed into it. Verified identical failure on
+   `--device cpu` (169.5 s) and `--device mps` (135.6 s) on the 40 804-primitive scene. The template now
+   documents the constraint and `Reshape` raises a named `ValueError`
+   (`Cannot reshape field 'shN_centroids' of shape (40804, 45) (1836180 elements) to [-1, 960, 3]`)
+   instead of a bare `RuntimeError`; `tests/test_format_profiles.py` pins it. The 512² (262 144-primitive)
+   matrix below exercises this profile successfully on both devices.
+3. **A `SOG-web-nosh` container is not re-encodable through `ffsplat convert`.** It decodes to an `sh` of
+   width 1, and every shipped PLY profile splits a *16-wide* `sh`:
+   `RuntimeError: split_with_sizes expects split_sizes to sum exactly to 1 (input tensor's size at
+   dimension 1), but got split_sizes=[1, 15]` — identical on cpu and mps. The A1 harness decodes such a
+   container in-process and zero-pads the DC-only `sh` back to 16 before writing the PLY (the nosh PLY
+   profile discards the padding); the gap itself is left as reported.
+
+## A2. The unverified surface: mpsplat's 28 skipped tests
+
+`vendor/mpsplat` is the byte-identical mpsplat provider. Its suite on this machine:
+
+```
+$ cd /Users/henrygetz/Downloads/mpsplat && .venv/bin/python -m pytest -v -p no:randomly --no-header
+======================= 35 passed, 28 skipped in 26.39s ========================
+```
+
+**Every one of the 35 passing tests lives in the four MPS-specific files** (nothing else runs on a Mac,
+because there is no CUDA extension and no CUDA device):
+
+| passing file | tests | what it covers on MPS |
+|---|---|---|
+| `tests/test_mps_metal.py` | 23 | the native Metal kernels: projection (EWA + UT), tile intersection, `rasterize_to_pixels_3dgs_fwd/_bwd`, spherical harmonics, 2DGS kernels |
+| `tests/test_mps_autograd.py` | 6 | the Metal kernels' autograd wiring (`rasterize_to_pixels_3dgs_bwd`, SH backward) |
+| `tests/test_mps_smoke.py` | 3 | end-to-end smoke renders |
+| `tests/test_mps_cpu_parity.py` | 3 | MPS vs CPU numeric parity of the Metal path |
+
+The 28 skips, with the reason verbatim from pytest and whether ffsplat can reach that capability:
+
+| # | test(s) | reason (verbatim) | capability | does ffsplat use it? |
+|---|---|---|---|---|
+| 12 | `test_2dgs.py::test_projection_2dgs[batch_dims0/1/2]`, `::test_fully_fused_projection_packed_2dgs[batch_dims0/1/2-False]`, `::test_rasterize_to_pixels_2dgs[batch_dims0/1/2-3/31]` (3+3+6) | `2DGS support wasn't built` | 2D Gaussian splatting | **no** — ffsplat renders 3DGS only (`scene.primitives: 3DGS-INRIA`) |
+| 9 | `test_math.py::test_quat_to_rotmat`, `::test_rotmat_to_quat`, `::test_rotmat_to_quat_roundtrip`, `::test_quat_multiply`, `::test_quat_inverse`, `::test_quat_rotate`, `::test_quat_slerp`, `::test_safe_normalize`, `::test_quat_normalize_rotation` | `legacy CUDA-only test, skipped on device=mps` | the CUDA quaternion/math kernels | **partly** — ffsplat never calls these kernels; the equivalent maths is exercised *through* the MPS tests of the projection/rasterizer and through the A3 reference below |
+| 2 | `test_strategy.py::test_strategy`, `::test_strategy_requires_grad` | `3DGS support isn't built in` | densification/pruning strategies (training) | **no** — see the forward-only proof |
+| 1 | `test_compression.py::test_png_compression` | `legacy CUDA-only test, skipped on device=mps` | the CUDA png/compression kernel | **no** — ffsplat's image writing is `cv2`/`Pillow` + `pillow_heif` on the host, never mpsplat's codec |
+| 1 | `test_ftheta.py::test_rasterization[RGB]` | `3DGUT support isn't built in` | UT / ftheta camera models | **no** — ffsplat is pinhole-only (`--input-format 3DGS-INRIA.ply`, `Ks` is a plain pinhole matrix) |
+| 1 | `test_basic.py` (module-level) | `gsplat CUDA extension not available` | the CUDA `_C` extension build | no — that *is* the point of the port |
+| 2 | `test_cameras.py` (module-level) | `CUDA required for camera model tests` | `create_camera_model` / rolling shutter | **no** — ffsplat builds `viewmats`/`Ks` itself from camorph/COLMAP |
+
+**ffsplat is forward-only and never trains.** Verbatim:
+
+```
+$ grep -rn --include=*.py -E "\.backward\(\)|requires_grad|torch\.optim|Optimizer|\.train\(\)|autograd\." src/ffsplat/
+(exit 1: no matches)
+
+$ grep -rn --include=*.py "no_grad" src/ffsplat/
+src/ffsplat/models/clustering.py:132:        with torch.no_grad():
+src/ffsplat/cli/view.py:17:@torch.no_grad()
+src/ffsplat/cli/live.py:525:    @torch.no_grad()
+src/ffsplat/cli/eval.py:26:@torch.no_grad()
+
+$ grep -rn --include=*.py "rasterization(" src/ffsplat/
+src/ffsplat/cli/view.py:37: ... rasterization(
+src/ffsplat/cli/live.py:546: ... rasterization(
+src/ffsplat/cli/eval.py:38: ... rasterization(
+```
+
+Consequence: the 28 skips remove **no capability ffsplat needs**. The only caveat is that the CUDA-path
+tests being skipped means mpsplat's Metal path is validated by its own MPS test files, not by the CUDA
+reference tests — which is exactly why A3 below adds an *independent* reference.
+
+## A3. Independent rasterizer reference (not mpsplat's own suite)
+
+`ffsplat-fixtures/rasterizer_reference_check.py` implements the 3DGS renderer from the paper in plain
+PyTorch on the CPU and shares no code with mpsplat:
+
+* EWA projection: `means_c = R mu + t`; `J = [[fx/z, 0, -fx x/z^2], [0, fy/z, -fy y/z^2]]`;
+  `Sigma = R S S^T R^T`; `Sigma_2d = J W Sigma W^T J^T + 0.3 I`; conic `[S22, -(S01+S10)/2, S11]/det`.
+* Depth-sorted front-to-back alpha compositing over **all** pixels and **all** gaussians
+  (`alpha = clamp(opacity * exp(-(0.5 (a dx^2 + c dy^2) + b dx dy)), max=0.99)`, sample point
+  `(col+0.5, row+0.5)`), degree-0 SH colour `0.5 + 0.28209 * f_dc`.
+* The conventions were matched to the published ones (citations in the script header:
+  `vendor/mpsplat/gsplat/cuda/_torch_impl.py:240-311`, `_constants.py:18`), and this was verified by
+  comparing the reference's own `means2d` / `depths` / `conics` with mpsplat's `fully_fused_projection`
+  for the same input on both devices — they agree to the printed precision:
+  `mine conics [[0.2355518937110901, 0.17499999701976776, 0.6168176531791687], ...]` vs
+  `mps conics [[0.23555190861225128, 0.17499999701976776, 0.6168174743652344], ...]`.
+* Scene: 300 real gaussians selected from the real INRIA truck PLY (the most opaque ones whose 3.33-sigma
+  footprint lies fully inside the frame, 0.5-12 px sigma), real COLMAP camera 0 at 1/8 resolution
+  (244x136), `sh_degree=0`, `radius_clip=0`, `backgrounds=None`.
+
+Verbatim result:
+
+```
+$ .venv/bin/python rasterizer_reference_check.py
+# rasterizer reference check
+PLY .../raw/truck_tiny202.ply N=40804  camera 000001 1957x1091 -> 244x136 (1/8)
+candidates fully inside frame with 0.5-12 px sigma: 18131; selected 300 by descending opacity
+reference: mean=0.016917 max=1.947017 covered(alpha>1/255)=0.1581
+mps : shape=(136, 244, 3) mean=0.016956  MAE(all)=4.191e-05  MAE(covered,5247px)=2.560e-04  max=8.193e-02  p99.9=1.089e-02  px(|d|>0.01)=118/33184  PSNR=59.96dB  corr=0.999935
+cpu : shape=(136, 244, 3) mean=0.016956  MAE(all)=4.192e-05  MAE(covered,5247px)=2.561e-04  max=8.193e-02  p99.9=1.089e-02  px(|d|>0.01)=118/33184  PSNR=59.96dB  corr=0.999935
+
+RESULT: reference vs mpsplat on ['mps', 'cpu'] -> AGREE (MAE over the image < 5e-3 and >=99% of pixels within 0.01)
+```
+
+Tolerance logic and its limits, stated explicitly:
+
+* the criterion is **MAE over the whole image < 5e-3** (measured 4.2e-05, i.e. 100x inside) **and at least
+  99% of pixels within 0.01** (measured 99.64%): the residual is ≤ 0.4% of pixels, worst pixel 0.082 on a
+  1.95-peak image.
+* the tail is **not** reproduced by either of gsplat's own cut-offs applied alone to the reference: adding
+  the `alpha < 1/255` threshold gives MAE 1.05e-04 (worse), and adding a 3.33-sigma per-pixel footprint cut
+  gives MAE 1.69e-02 (much worse, because a diagonal-based radius is not the ellipse's own axes). So the
+  tail is attributed to the rasterizer's tile-local culling/early-out interacting with strongly anisotropic
+  footprints, not to a device or projection error — the projected means, depths **and conics** agree
+  exactly.
+* mpsplat on **CPU** and mpsplat on **MPS** differ from the reference by the same numbers to 6 decimal
+  places, so the Metal kernels carry no additional error over the pure-torch path.
