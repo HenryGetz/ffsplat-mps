@@ -423,12 +423,36 @@ def reorder_plas(
         # replace all values in one block with the same color
         # params_blocky_flat = debug_show_blocks(params_blocky_flat)
 
-        # `prev_dist` stays a Python float exactly as upstream: one host sync per block config.
-        prev_dist = l2_dist(params_blocky_flat, target_blocky_flat)
+        # Local patch (see vendor/plas/VENDOR.md). Two things changed here, and nothing else.
+        #
+        # (1) The early-exit test is the one upstream evaluates: the improvement of the *last*
+        #     reorder, `1 - d(i) / d(i-1)`. Upstream recomputes `d(i)` with a full pass over the
+        #     block plus a host sync on every reorder; here the reorder hands its own `d(i)` back
+        #     (the permutation solver already knew it), and `d(i-1)` is the value the previous
+        #     reorder returned, so the ratio is formed on the device.
+        #
+        # (2) That test is *sampled*: it runs after the first reorder - exactly where upstream runs
+        #     it, which is what `has_improved` and the outer loop's "give up after a few configs"
+        #     rule are calibrated on - and then once every `check_every` reorders. Sampling it
+        #     overshoots the stopping point by up to `check_every - 1` reorders per inner loop, and
+        #     measured on the real 512^2 grid most of PLAS's reorders are in a long tail where the
+        #     improvement hovers just above `improvement_break`, so the extra reorders are real.
+        #     That trade (a few percent more reorders for `check_every` times fewer host syncs) is
+        #     what `PROGRESS.md` C4 measures; `check_every == 1` samples every reorder.
+        #
+        # `check_every == 1` therefore keeps the window at 1 and takes the `l2_dist` branch below,
+        # i.e. upstream's function, values, sync count and stopping point, bit for bit.
+        if check_every == 1:
+            prev_dist = l2_dist(params_blocky_flat, target_blocky_flat)
+            prev_dist_tensor = None
+        else:
+            prev_dist = 0.0
+            prev_dist_tensor = distance_with_batch_dim(params_blocky_flat, target_blocky_flat).sum()
 
         # for i in range(n_block_reorders):
         i = 0
         has_improved = False
+        next_check = 1
         while True:
 
             num_reorders += 1
@@ -442,38 +466,30 @@ def reorder_plas(
             )
 
             i += 1
-            if check_every > 1 and i % check_every:
+            if i < next_check:
+                prev_dist_tensor = cur_dist
                 continue
 
-            # Local patch (see vendor/plas/VENDOR.md): the inner loop's only host sync, once per
-            # `check_every` reorders instead of once per reorder. `check_every == 1` deliberately
-            # calls upstream's own `l2_dist` - same function, same summation order, same value -
-            # so that setting reproduces upstream bit for bit and costs exactly what upstream
-            # costs. `check_every > 1` uses the distance the permutation solver already produced
-            # for the reorder it just applied, which is the same value without a second full pass
-            # over the grid.
-            cur_dist_value = (
-                l2_dist(params_blocky_flat, target_blocky_flat)
-                if check_every == 1
-                else cur_dist.item()
-            )
-
-            if prev_dist == 0:
-                improvement_factor = 0
+            if prev_dist_tensor is None:
+                # upstream's own distance: same function, same summation order, same value
+                cur_dist_value = l2_dist(params_blocky_flat, target_blocky_flat)
+                improvement_factor = 0 if prev_dist == 0 else 1 - cur_dist_value / prev_dist
+                prev_dist = cur_dist_value
             else:
-                # Local patch (see vendor/plas/VENDOR.md): with `check_every` reorders per check,
-                # the natural generalisation of upstream's test is the *geometric mean* of the
-                # per-reorder improvement over the window, so `improvement_break` keeps its
-                # meaning and the loop overshoots its stopping point by a fraction of a window
-                # instead of by the whole window. `check_every == 1` reduces to upstream's
-                # `1 - cur / prev` exactly.
-                improvement_factor = 1 - (cur_dist_value / prev_dist) ** (1.0 / check_every)
+                # the loop's only host sync, once per `check_every` reorders instead of once per reorder
+                ratio = torch.where(
+                    prev_dist_tensor > 0, cur_dist / prev_dist_tensor, torch.ones_like(cur_dist)
+                )
+                improvement_factor = (1.0 - ratio).item()
+                prev_dist_tensor = cur_dist
 
             if pbar:
+                # `float(cur_dist)` is a second host sync, so it is only ever evaluated when a
+                # progress bar is actually being updated
                 pbar.set_postfix(
                     {
                         "it": "{:04d}".format(i),
-                        "dist": f"{cur_dist_value:.2E}",
+                        "dist": f"{cur_dist_value if prev_dist_tensor is None else float(cur_dist):.2E}",
                         "dist_factor": f"{improvement_factor:+.2E}",
                     }
                 )
@@ -482,8 +498,8 @@ def reorder_plas(
                 # print(f"breaking at {filter_size_x=} - {i=} - {improvement_factor=}")
                 break
 
-            prev_dist = cur_dist_value
             has_improved = True
+            next_check = i + check_every
 
         # (c, h, w)
         params = blocky_to_params(

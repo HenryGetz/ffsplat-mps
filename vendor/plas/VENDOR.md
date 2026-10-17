@@ -13,6 +13,7 @@ dependency in `pyproject.toml`.
 | Vendored version | `plas` **0.1** (distribution name `plas`, as upstream) |
 | License | Apache-2.0 (`LICENSE`, unchanged from upstream) |
 | Local patch | `plas/core.py` only — see *What was changed* below |
+| Licence verdict | **Apache-2.0 — redistribution and modification are permitted**, so vendoring is legal and shippable. Upstream has no `NOTICE` file; the full licence text is kept verbatim in `LICENSE` next to this file (byte-identical to upstream's, and to the licence the pinned dependency installed). |
 
 ## Why this copy exists
 
@@ -55,26 +56,30 @@ clone at the pinned commit shows exactly these edits (78 changed lines including
 3. **`reorder_blocky_shuffled` returns the distance** as a third element. Return arity changed
    from 2 to 3.
 
-4. **`reorder_plas(..., check_every=1)`** — the early-exit test runs once every `check_every`
-   reorders. `prev_dist` stays a Python `float` exactly as upstream, so the loop still costs
-   exactly one sync per block config for the pre-loop distance; the *only* thing that changes is
-   that the per-reorder `l2_dist` call (and its sync) now happens once per `check_every`
-   reorders. At `check_every == 1` the code calls upstream's own `l2_dist` — same function, same
-   summation order, same value, same number of syncs — so that setting is a bit-for-bit no-op and
-   is what `plas_patch_equivalence.py` verifies. At `check_every > 1` it uses the distance the
-   solver already produced for the reorder it just applied, which is the same value without a
-   second full pass over the grid.
+4. **`reorder_plas(..., check_every=1)`** — the early-exit test is upstream's own test, sampled.
+   Two things change, and nothing else:
 
-   With `check_every > 1` the test compares the distance now against the distance `check_every`
-   reorders ago, i.e. it measures the improvement over the last `check_every` reorders instead of
-   over the last one. To keep `improvement_break` meaning the same thing, the batched test uses
-   the **geometric mean** per-reorder improvement over the window,
-   `1 - (cur / prev) ** (1 / check_every)`, which reduces to upstream's `1 - cur / prev` at
-   `check_every == 1`. The inner loop still overshoots its stopping point, but by a fraction of a
-   window rather than by a whole window. PLAS is unseeded and not reproducible run-to-run to
-   begin with (`np.random.randint`, `torch.randperm`), so this is a heuristic change to the
-   iteration count, not a correctness change. The reorders themselves, the permutation solver,
-   the low-pass target and the applied permutation are untouched.
+   (a) The test is `1 - d(i) / d(i-1)`, the improvement of the *last* reorder, exactly as upstream
+   evaluates it. Upstream recomputes `d(i)` with a full pass over the block plus a host sync on
+   every reorder; here the reorder hands its own `d(i)` back (the permutation solver already knew
+   it) and `d(i-1)` is the value the previous reorder returned, so the ratio is formed on the
+   device and read back once. The loop's only host sync is that one `.item()`.
+
+   (b) That test runs after the first reorder — exactly where upstream runs it, which is what
+   `has_improved` and the outer loop's "give up after a few configs" rule are calibrated on — and
+   then once every `check_every` reorders. Sampling it overshoots the stopping point by up to
+   `check_every - 1` reorders per inner loop, and on the real 512^2 grid most of PLAS's reorders
+   are in a long tail where the improvement hovers just above `improvement_break`, so that
+   overshoot is real work: `check_every` trades a few percent more reorders for `check_every` times
+   fewer host syncs, which is what `PROGRESS.md` C5 measures.
+
+   `check_every == 1` keeps the window at 1 and calls upstream's own `l2_dist` — same function,
+   same summation order, same values, same sync count, same stopping point — so that setting is a
+   bit-for-bit no-op and is what `plas_patch_equivalence.py` verifies. PLAS is unseeded and not
+   reproducible run-to-run to begin with (`np.random.randint`, `torch.randperm`), so at
+   `check_every > 1` a different stopping point is a heuristic change to the iteration count, not a
+   correctness change. The reorders themselves, the permutation solver, the low-pass target and the
+   applied permutation are untouched.
 
    One thing this patch does **not** change, and that is worth recording: upstream's solver
    minimises `sum_c C[c, perm[c]]` but `reorder_blocky_shuffled` then applies the mapping
@@ -85,8 +90,9 @@ clone at the pinned commit shows exactly these edits (78 changed lines including
    applied 54.28 vs solver minimum 34.75). That is upstream behaviour, left exactly as it is.
 
 5. **`sort_with_plas(..., check_every=1)`** — plumbs the value through, documented in the
-   docstring. The default is `1`, i.e. upstream behaviour, so the patch is opt-in at the call
-   site (`src/ffsplat/models/transformations.py` passes the tuned value).
+   docstring: `check_every` is the number of reorders between two evaluations of the early-exit
+   test. The default is `1`, i.e. upstream behaviour, so the patch is opt-in at the call site
+   (`src/ffsplat/models/transformations.py` passes the tuned value).
 
 Everything stays `float32` and device-agnostic: the patched path uses only `torch.min`,
 `torch.argsort`, `sum`, `gather` and `.item()`, all of which behave the same on CPU, CUDA and MPS.
@@ -123,6 +129,12 @@ Modified: `plas/core.py` (the four edits above).
 Deliberately **not** vendored (not needed to `import plas`): `eval/`, `examples/`, `img/`
 (PLAS's own evaluation scripts and figures; `lapjv`, which only `eval/flas.py` needs, is still
 dropped on macOS by `[tool.uv] override-dependencies` in `pyproject.toml`), `.vscode/`.
+
+`vendor/plas/plas.egg-info/` (and `vendor/mpsplat/mpsplat.egg-info/`) appear after an install:
+`uv sync` builds the two editable path sources with setuptools, which writes its metadata into the
+source tree. They are build artifacts of *your* install, not part of the vendored copy, they are
+covered by the repo's `.gitignore` (`*.egg-info/`) and they are not tracked - so the byte-identity
+claims in this file and in `vendor/mpsplat/VENDOR.md` hold for everything that is.
 
 ## Why the package is still imported as `plas`
 
