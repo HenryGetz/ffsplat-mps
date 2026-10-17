@@ -15,6 +15,8 @@ carrying an ``uint16`` dtype, only on the byte pattern.
 
 from __future__ import annotations
 
+import warnings
+
 import torch
 
 #: dtypes the MPS backend cannot represent, mapped to an exact substitute.
@@ -90,3 +92,28 @@ def synchronize(device: torch.device) -> None:
         torch.mps.synchronize()
     elif device.type == "cuda":
         torch.cuda.synchronize()
+
+
+#: Highest spherical-harmonics degree mpsplat's Metal SH kernel supports (``K = (deg+1)^2 <= 25``).
+#: ``vendor/mpsplat/gsplat/cuda/_wrapper.py:374-387`` routes ``spherical_harmonics`` to the Metal
+#: kernel only while ``coeffs.shape[-2] <= 25``; a higher degree silently evaluates on the pure-torch
+#: path instead, which is several times slower. Nothing else in ffsplat's rasterization call chain
+#: has such a silent guard - see ``tests/test_metal_path.py``.
+MAX_METAL_SH_DEGREE = 4
+
+
+def warn_if_not_metal(sh_degree: int, device: torch.device) -> None:
+    """Warn before a render that would silently leave mpsplat's Metal kernels.
+
+    Only the SH degree can do this for ffsplat's argument set (pinhole camera, ``render_mode="RGB"``,
+    no ``backgrounds``/``masks``, default ``tile_size``/``rasterize_mode``). The render stays correct
+    on the fallback, it is just much slower, so this is a warning rather than an error.
+    """
+    if device.type == "mps" and sh_degree > MAX_METAL_SH_DEGREE:
+        warnings.warn(
+            f"sh_degree={sh_degree} is beyond mpsplat's Metal spherical-harmonics kernel "
+            f"(degree <= {MAX_METAL_SH_DEGREE}); the spherical harmonics will be evaluated on the "
+            f"slow pure-torch path.",
+            RuntimeWarning,
+            stacklevel=2,
+        )

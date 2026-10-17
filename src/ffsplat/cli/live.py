@@ -32,7 +32,7 @@ from ..coding.scene_encoder import DecodingParams, EncodingParams, SceneEncoder
 from ..datasets.blenderparser import BlenderParser
 from ..datasets.colmapparser import ColmapParser
 from ..datasets.dataset import Dataset
-from ..device import resolve_device
+from ..device import resolve_device, warn_if_not_metal
 from ..models.transformations import get_dynamic_params
 from ..render.viewer import CameraState, Viewer
 
@@ -543,6 +543,7 @@ class InteractiveConversionTool:
         K: Float[Tensor, "3 3"] = torch.from_numpy(camera_K).float().to(device)
         viewmat: Float[Tensor, "4 4"] = torch.linalg.inv(c2w)
         # We need to separate the type annotation from the unpacking
+        warn_if_not_metal(sh_degree, means_t.device)
         raster_out: tuple[Float[Tensor, "1 H W 4"], Tensor, dict] = rasterization(
             means_t,  # [N, 3]
             quats_t,  # [N, 4]

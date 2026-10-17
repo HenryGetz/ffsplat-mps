@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from ..coding.scene_decoder import decode_gaussians
-from ..device import resolve_device
+from ..device import resolve_device, warn_if_not_metal
 from ..render.viewer import CameraState, Viewer
 
 
@@ -34,6 +34,7 @@ def render_fn(
     K: Float[Tensor, "3 3"] = torch.from_numpy(camera_K).float().to(device)
     viewmat: Float[Tensor, "4 4"] = torch.linalg.inv(c2w)
     # We need to separate the type annotation from the unpacking
+    warn_if_not_metal(sh_degree, means_t.device)
     raster_out: tuple[Float[Tensor, "1 H W 4"], Tensor, dict] = rasterization(
         means_t,  # [N, 3]
         quats_t,  # [N, 4]

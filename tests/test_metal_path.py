@@ -197,3 +197,45 @@ def test_live_render_fn_uses_the_metal_kernels(monkeypatch) -> None:
     assert float(out.mean()) > 0.0
     assert "rasterize_to_pixels_3dgs_metal" in hits["metal"]
     _check_argument_policy(hits)
+
+
+def test_sh_degree_above_four_is_announced(monkeypatch) -> None:
+    """The one silent fallback left in ffsplat's call chain: SH degree > 4.
+
+    `vendor/mpsplat/gsplat/cuda/_wrapper.py:374-387` only routes `spherical_harmonics` to the Metal
+    kernel while `coeffs.shape[-2] <= 25`; beyond that it evaluates SH with the pure-torch
+    implementation without any error. `ffsplat.device.warn_if_not_metal` now announces it, and the
+    projection/rasterisation kernels stay on Metal.
+    """
+    from gsplat.cuda import _torch_impl
+    from gsplat.cuda._wrapper import spherical_harmonics
+
+    hits = _install_probe(monkeypatch)
+    torch_fallback_sh = []
+    original = _torch_impl._spherical_harmonics
+    monkeypatch.setattr(
+        _torch_impl,
+        "_spherical_harmonics",
+        lambda *a, **k: (torch_fallback_sh.append(1), original(*a, **k))[1],
+    )
+
+    generator = torch.Generator().manual_seed(0)
+    scene = _scene()
+    degree5 = torch.randn(N, 36, 3, generator=generator).to("mps")  # degree 5 -> K=36 > 25
+    assert spherical_harmonics(5, torch.ones(1, 3, device="mps"), degree5[:1]).shape == (1, 3)
+
+    with pytest.warns(RuntimeWarning, match="sh_degree=5"):
+        out = view_render_fn(
+            scene.means.data,
+            scene.quaternions.data,
+            scene.scales.data,
+            scene.opacities.data,
+            degree5,
+            5,
+            _camera_state(),
+            IMG_WH,
+        )
+    assert float(out.mean()) > 0.0
+    assert torch_fallback_sh, "degree 5 did not reach the torch SH path (probe assumption wrong)"
+    assert "rasterize_to_pixels_3dgs_metal" in hits["metal"], "the rasteriser left Metal"
+    assert hits["fallback"] == []

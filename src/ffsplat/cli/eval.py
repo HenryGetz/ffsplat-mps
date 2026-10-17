@@ -19,7 +19,7 @@ from ..coding.scene_decoder import decode_gaussians
 from ..datasets.blenderparser import BlenderParser
 from ..datasets.colmapparser import ColmapParser
 from ..datasets.dataset import Dataset
-from ..device import resolve_device, synchronize
+from ..device import resolve_device, synchronize, warn_if_not_metal
 from ..models.gaussians import Gaussians
 
 
@@ -34,6 +34,7 @@ def rasterize_splats(
     use_white_background: bool = False,
 ) -> tuple[Tensor, Tensor, dict]:
     colors = gaussians.sh.data
+    warn_if_not_metal(gaussians.sh_degree, colors.device)
     render_colors, render_alphas, info = rasterization(
         means=gaussians.means.data,
         quats=gaussians.quaternions.data,
