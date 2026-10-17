@@ -23,6 +23,16 @@ from .clustering import KMeans
 if TYPE_CHECKING:
     from ..models.fields import Operation
 
+#: How many reorders `plas`'s sort may perform between two evaluations of its per-block
+#: early-exit condition. Upstream evaluates it on every reorder and the test ends in
+#: `l2_dist(...).item()` (`plas/core.py:91-92`), so every iteration is a host synchronisation
+#: followed by a burst of tiny kernels - 5398 of the full-size encode's 5469 syncs, 86% of its
+#: wall time (PROGRESS.md B2.5/B4). `vendor/plas` carries one local patch that batches the test
+#: (see `vendor/plas/VENDOR.md`); this constant is the batch size ffsplat uses, chosen by
+#: measurement in PROGRESS.md B5. It applies on every device (the patch is device-agnostic);
+#: `1` restores upstream's per-reorder test.
+_PLAS_CHECK_EVERY = 4
+
 
 def convert_to_dtype(field_data: Tensor, dtype_str: str) -> Tensor:
     match dtype_str:
@@ -957,7 +967,12 @@ class PLAS:
     @staticmethod
     def _sort_on_device(grid: Tensor, improvement_break: float, verbose: bool) -> Tensor:
         """Run PLAS once on ``grid``'s own device. (``plas`` ships no type information.)"""
-        _, sorted_indices = sort_with_plas(grid, improvement_break=improvement_break, verbose=verbose)
+        _, sorted_indices = sort_with_plas(
+            grid,
+            improvement_break=improvement_break,
+            verbose=verbose,
+            check_every=_PLAS_CHECK_EVERY,
+        )
         return torch.as_tensor(sorted_indices)
 
     @staticmethod

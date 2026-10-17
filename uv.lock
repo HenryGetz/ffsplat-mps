@@ -400,7 +400,7 @@ requires-dist = [
     { name = "opencv-python", specifier = ">=4.11.0.86,<5.0.0.0" },
     { name = "pillow", specifier = ">=11.1.0,<12.0.0" },
     { name = "pillow-heif", specifier = ">=0.22.0,<1.0.0" },
-    { name = "plas", git = "https://github.com/fraunhoferhhi/PLAS.git?rev=4f1109c94f29a5a6de62bdf8f20cb3ce1ff0e680" },
+    { name = "plas", editable = "vendor/plas" },
     { name = "plyfile", specifier = ">=1.1.0,<2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2,<7.0.0" },
     { name = "torch", specifier = "==2.14.1" },
@@ -1550,11 +1550,28 @@ wheels = [
 [[package]]
 name = "plas"
 version = "0.1"
-source = { git = "https://github.com/fraunhoferhhi/PLAS.git?rev=4f1109c94f29a5a6de62bdf8f20cb3ce1ff0e680#4f1109c94f29a5a6de62bdf8f20cb3ce1ff0e680" }
+source = { editable = "vendor/plas" }
 dependencies = [
     { name = "click" },
     { name = "kornia" },
     { name = "lapjv", marker = "sys_platform != 'darwin'" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "opencv-python" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "plyfile" },
+    { name = "scipy" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "trimesh" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click" },
+    { name = "kornia" },
+    { name = "lapjv" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "opencv-python" },
