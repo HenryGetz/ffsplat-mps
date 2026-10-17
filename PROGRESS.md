@@ -2639,3 +2639,48 @@ three quality gates hold.
   honest answer to "what would it take".
 * **`manhattan` k-means and the image encoders** are unchanged and still the two other gaps in
   B4 items 2-3.
+
+## C9. The reverted head, measured end to end again
+
+`ffsplat-fixtures/plasfix_final3.sh` on the reverted head, with the machine's load sampled before and
+after, because that turned out to be the one thing that could not be controlled:
+
+```
+13:21  up 17 days,  4:07, 6 users, load averages: 7.47 6.09 7.12
+##### 1. full-size CLI encode (SOG-web, MPS)
+Successfully converted .../raw/truck/point_cloud.ply to /tmp/plasfix_final/sog
+real 365.85
+32228   /tmp/plasfix_final/sog
+
+##### 2. container fidelity: decoded vs input, order-independent, codec-derived budgets
+group                        worst vs input       budget  verdict
+f_dc_                              0.082205     0.141267  PASS
+f_rest_                              0.0127 0.05 (mean/range)  PASS
+opacity                            0.039440     0.047544  PASS
+rot_                               0.034564     0.192934  PASS
+scale_                             0.269486     1.286793  PASS
+x                                  0.002864  n/a (float)  PASS
+y                                  0.001131  n/a (float)  PASS
+z                                  0.004839  n/a (float)  PASS
+groups checked: 8; failures: []
+FULL CONTAINER OK
+
+##### 3. eval on that container against the real Tanks&Temples/truck COLMAP set
+PSNR: 24.295, SSIM: 0.8461, LPIPS: 0.184 Time: 0.052s/image Number of GS: 2540836 Size: 31.453MB
+real 24.11
+13:28  up 17 days,  4:14, 6 users, load averages: 8.76 7.20 7.21
+```
+
+**Both quality gates hold exactly**: all 8 container groups PASS with 0 failures, and the eval
+metrics are the acceptance target and the pre-change record to the digit.
+
+**The 365.85 s is NOT an idle-machine number.** The load averages above are 7.5 -> 8.8 on a 10-core
+machine, and another workstream's process was running throughout (`/tmp/mpsplat-fix-probe/...`,
+2.4% CPU, plus a GPU viewer). Two runs of this head on a loaded machine measured 343.02 s and
+365.85 s, i.e. 5.6% and 12.6% above the 324.8 s idle baseline, and the loaded instrumented run put
+the excess in stages this workstream does not touch (`kmeans 47.4 s` against 42.9 s). It cannot be a
+code difference: at this head `git diff 4bf4d07 -- pyproject.toml src/ffsplat/models/transformations.py`
+is **empty**, i.e. both files are byte-identical to the pre-workstream head, so PLAS here is the
+pinned upstream dependency running upstream's code. [INFERENCE] an idle-machine run of this head
+should reproduce 324.8 s; no idle window was available in this session, and the load is recorded
+rather than the number being claimed clean.
