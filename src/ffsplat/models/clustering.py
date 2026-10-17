@@ -62,27 +62,32 @@ def _distances(rows: Tensor, centroids: Tensor, distance: str) -> Tensor:
         case "cosine":
             return 1.0 - _l2_normalize(rows) @ _l2_normalize(centroids).t()
         case "manhattan":
-            if rows.device.type == "mps":
-                return _manhattan_blocked(rows, centroids)
-            return torch.cdist(rows, centroids, p=1)
+            return _manhattan_blocks(rows, centroids)
     raise ValueError(f"Unknown distance metric: {distance!r} (expected one of {DISTANCES})")
 
 
-def _manhattan_blocked(rows: Tensor, centroids: Tensor) -> Tensor:
-    """``[C, D] x [K, D] -> [C, K]`` L1 scores, accumulated in centroid blocks ``[C, B, D]``.
+def _manhattan_blocks(rows: Tensor, centroids: Tensor) -> Tensor:
+    """``[C, D] x [K, D] -> [C, K]`` L1 scores, summed over centroid blocks.
 
-    Only used on MPS. ``torch.cdist(p=1)`` is 2x faster there for small chunks, but its MPS
-    implementation allocates an internal ``[C, B, D]`` buffer whose size scales with the row
-    chunk, and above ~1600 rows (K=40804, D=45) it is either rejected
+    The L1 metric has no matmul identity, so the score matrix has to be materialised by
+    subtraction; the only questions are how big a block to materialise and whether to use a
+    fused kernel. ``torch.cdist(p=1)`` is the fused kernel, but on a whole chunk its MPS
+    implementation allocates an internal ``[C, B, D]`` buffer that scales with the row chunk:
+    above ~1600 rows (K=40804, D=45) it is either rejected
     (``RuntimeError: Invalid buffer size: 22.50 GiB``) or - worse - returns silently wrong
-    labels (4/40804 correct, 0.00 s; PROGRESS.md B2.2). The blocked form keeps the peak
-    allocation bounded by ``_MAX_SCORE_ELEMS`` and was verified to agree with cdist on CPU.
+    labels (4/40804 correct, 0.00 s; PROGRESS.md B2.2). Calling it per *centroid block* keeps
+    the peak allocation bounded by ``_MAX_SCORE_ELEMS`` while keeping the fused kernel, and was
+    measured on the real shapes (one full assignment pass, labels compared element-wise):
+
+        N=40804,  K=40804,  D=45:  cpu 11.96 s ->  3.98 s   mps 5.00 s -> 4.12 s
+        N=262144, K=65536, D=45:  cpu 118.19 s -> 38.24 s   mps 56.83 s -> 47.98 s
+        labels identical in all four comparisons (40804/40804, 262144/262144).
     """
     block = max(1, _MAX_SCORE_ELEMS // max(rows.shape[0], 1) // max(rows.shape[1], 1))
     out = rows.new_empty((rows.shape[0], centroids.shape[0]))
     for start in range(0, centroids.shape[0], block):
         stop = min(start + block, centroids.shape[0])
-        out[:, start:stop] = (rows.unsqueeze(1) - centroids[start:stop].unsqueeze(0)).abs().sum(dim=2)
+        out[:, start:stop] = torch.cdist(rows, centroids[start:stop], p=1)
     return out
 
 
