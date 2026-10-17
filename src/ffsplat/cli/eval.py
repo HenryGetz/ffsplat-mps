@@ -34,7 +34,6 @@ def rasterize_splats(
     use_white_background: bool = False,
 ) -> tuple[Tensor, Tensor, dict]:
     colors = gaussians.sh.data
-    background = torch.ones(1, colors.shape[-1], device=colors.device) if use_white_background else None
     render_colors, render_alphas, info = rasterization(
         means=gaussians.means.data,
         quats=gaussians.quaternions.data,
@@ -46,8 +45,17 @@ def rasterize_splats(
         width=width,
         height=height,
         sh_degree=gaussians.sh_degree,
-        backgrounds=background,
+        # NEVER pass `backgrounds`/`masks` here: any non-None value silently routes the call off
+        # the Metal kernels onto mpsplat's pure-torch rasterizer
+        # (vendor/mpsplat/gsplat/cuda/_wrapper.py:1102-1130), which is several times slower on MPS.
+        # The white background is composited below instead -- the rasterizer's own
+        # `color + transmittance * background` blend (transmittance = 1 - alpha).
+        backgrounds=None,
     )
+    if use_white_background:
+        render_colors = render_colors + (1.0 - render_alphas) * torch.ones(
+            1, colors.shape[-1], device=colors.device
+        )
     if masks is not None:
         render_colors[~masks] = 0
     return render_colors, render_alphas, info
