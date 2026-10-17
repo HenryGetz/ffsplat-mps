@@ -119,3 +119,13 @@ def test_sog_web_variants_encode_and_decode(tmp_path: Path, profile: str, expect
     assert decoded.num_gaussians == 961
     assert decoded.sh.data.shape[1] == 16
     assert decoded.means.data.dtype == torch.float32
+
+
+def test_sog_playcanvas_requires_the_full_codebook(tmp_path: Path) -> None:
+    """SOG-PlayCanvas packs a fixed 1024x960 codebook texture (65536 clusters of 45 SH).
+
+    Scenes with fewer primitives get a smaller codebook from the k-means clamp, so the profile
+    cannot be used on them. The reshape must say so instead of raising a bare RuntimeError.
+    """
+    with pytest.raises(ValueError, match="Cannot reshape field 'shN_centroids'"):
+        encode_gaussians(_synthetic_scene(), tmp_path / "playcanvas", "SOG-PlayCanvas", False)

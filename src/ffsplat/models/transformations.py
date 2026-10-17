@@ -568,7 +568,13 @@ class Reshape(Transformation):
                     "input_fields": [field_name],
                     "transforms": [{"reshape": {"shape": field_data.shape}}],
                 })
-                field_data = field_data.reshape(*shape)
+                try:
+                    field_data = field_data.reshape(*shape)
+                except RuntimeError as exc:
+                    raise ValueError(
+                        f"Cannot reshape field {field_name!r} of shape {tuple(field_data.shape)} "
+                        f"({field_data.numel()} elements) to {list(shape)}: {exc}"
+                    ) from exc
             case _:
                 raise ValueError(f"Unknown Reshape parameters: {params}")
 
