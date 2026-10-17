@@ -672,7 +672,7 @@ PSNR: 6.002, SSIM: 0.0826, LPIPS: 0.664 Time: 0.088s/image Number of GS: 40804 S
 - PSNR is low because this smoke run used the deliberately tiny 40 804-primitive subsample container
   (most of the frame is genuinely empty there), not the full scene.
 
-### 2.10 Repo quality gates (final environment)
+### 2.10 Repo quality gates (environment at the end of Stage 2)
 
 ```
 --- ruff check . ---
@@ -852,15 +852,17 @@ PSNR: 24.295, SSIM: 0.8461, LPIPS: 0.184 Time: 0.046s/image Number of GS: 254083
 
 | check | command | result | failures tied to MPS? |
 |---|---|---|---|
-| unit tests | `pytest --doctest-modules -q` (`make test`) | **13 passed** in ~1 s | none — 0 failures |
+| unit tests | `pytest --doctest-modules -q` (`make test`) | **13 passed** in ~1 s *(Stage-3 record; **23 passed** at HEAD)* | none — 0 failures |
 | lock consistency | `uv lock --locked` | `Resolved 150 packages` | n/a |
 | types | `mypy` | **Success: no issues found in 11 source files** | none |
 | dependencies | `deptry .` | **Success! No dependency issues found** | none |
 | lint | `ruff check --no-fix .` | 5 findings, **all pre-existing upstream** (4 in files this port never touched, the 5th not in the diff) | no |
 | format | `ruff format --check .` | 3 files "would reformat", **all pre-existing** upstream nested-quote f-string style | no |
 
-The suite is small (the repo ships 2 test functions); 11 tests were added for the new code
-(`tests/test_clustering.py`, `tests/test_ply_io.py`). The port introduces **zero** test failures.
+The suite is small (the repo ships 2 test functions); 11 tests were added for the new code at that
+stage (`tests/test_clustering.py`, `tests/test_ply_io.py`) - **21 added in total at HEAD** (the review
+added `tests/test_format_profiles.py` and `tests/test_metal_path.py`). The port introduces **zero**
+test failures.
 
 ### 3.4 `grep -rn "cuda" src/ffsplat/` — final classification
 
@@ -2018,7 +2020,10 @@ b960016 Fix SOG-web-nosh: the sh split must cover all 16 coefficients
 ```
 
 (The commit that adds this paragraph is the 18th; a file cannot contain its own hash, so it is the one
-commit of this review that is not in the list above.)
+commit of this review that is not in the list above. Two later docs-only commits follow it - the
+independent-audit corrections and the Stage-3 label - bringing the branch to
+`git rev-list --count 3fb6444..HEAD` = 29 at `55d7fee`, i.e. 20 commits from this review plus the
+7 of the original port.)
 
 Pushed to `fork` = `https://github.com/HenryGetz/ffsplat-mps.git`, branch `apple-silicon`. Never pushed
 upstream, never force-pushed. Harnesses and logs used for every number live outside the repo in
@@ -2034,12 +2039,12 @@ upstream, never force-pushed. Harnesses and logs used for every number live outs
 | every GPU-capable stage runs on MPS; CPU stages have a measured reason | done | README §"Device policy" (stage-by-stage table), B2.5, B4 |
 | no silent performance fallbacks on hot paths | done | `eval` composited `backgrounds` (B2.3, 44.8x measured); `tests/test_metal_path.py` traps all three torch fallbacks and pins `tile_size`/`backgrounds`/`masks`/`rasterize_mode`/SH degree; the SH-degree>4 fallback is the one that cannot be avoided and is now warned about |
 | full-size MPS encode beats the CPU baseline with per-stage attribution | done | like-for-like at HEAD: MPS 324.8 s vs CPU 683.65 s (~2.1x); MPS is also 1.31x faster than its own pre-optimisation baseline (425.8 s); attribution PLAS 291.5 / k-means 42.9 / images 4.8 / quantise 0.13 (B3) |
-| GPU-utilisation evidence per stage | done | k-means 99.7%, PLAS 84.6%, image encoding 26.7% (CPU-bound), whole run 88.2% (B3) |
+| GPU-utilisation evidence per stage | done | 512² scene (B3): k-means 99.7%, PLAS 84.6%, image encoding 26.7% (CPU-bound), whole run 88.2%; full-size run: PLAS 94.9%, k-means 99.8%, image encoding 20.1%, whole run 94.4% (independent audit; my own full-size run recorded 94.2% run-wide) |
 | all seven profiles' parity resolved | done | A1.3 (202²) and A1.5 (512²): every row PASS, with the single over-budget row (`SOG-web-sh-split`'s `f_dc`) resolved by the A1.5a control experiment rather than a threshold; four template bugs fixed with tests; three device-independent codec defects reported |
 | raster cold/warm + eval wall clock | done | 0.09 s cold / 0.033 s warm on Metal (5.13/1.69 s on the fallback); eval 0.045 s/image, metrics identical |
 | upstream tests + mypy/deptry/ruff clean for touched files | done, with the caveat stated | 23 passed; mypy/deptry/uv lock clean; **no new findings**: the 5 `ruff check` findings (one of them `models/transformations.py:1533`, a file this branch edits) and the 3 `ruff format --check` complaints (`cli/eval.py`, `cli/live.py`, `models/transformations.py`) are pre-existing upstream lines, verified identical at `3fb6444` |
 | README + PROGRESS + MORNING_REPORT updated with measured numbers only | done | old numbers kept and labelled baseline |
-| worktree clean, commits small, pushed to the fork | done | `git status --short` empty; 14 commits pushed |
+| worktree clean, commits small, pushed to the fork | done | `git status --short` empty; `git rev-list --count 3fb6444..HEAD` = 29 commits on the branch at `55d7fee` (20 of them from this review), pushed to the fork |
 
 **Explicit gaps (not run / not fixable here):** an end-to-end `ffsplat eval` with
 `white_background=True` (needs a blender-style dataset, absent from the fixtures); the CPU-side
