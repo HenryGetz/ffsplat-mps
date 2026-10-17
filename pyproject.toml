@@ -112,7 +112,10 @@ warn_unused_ignores = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["gsplat.*", "plyfile.*"]
+# `gsplat` is the vendored mpsplat tree and `plas` the vendored PLAS tree; both are installed as
+# editable path sources, which mypy cannot resolve from site-packages, and neither ships type
+# information. Same treatment for both, rather than a `type: ignore` at each import.
+module = ["gsplat", "gsplat.*", "plas", "plas.*", "plyfile.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

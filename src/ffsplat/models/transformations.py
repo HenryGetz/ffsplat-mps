@@ -12,7 +12,7 @@ import torch
 import yaml
 from PIL import Image
 from pillow_heif import register_avif_opener  # type: ignore[import-untyped]
-from plas import sort_with_plas  # type: ignore[import-untyped]
+from plas import sort_with_plas
 from torch import Tensor
 
 from ..device import encoding_dtype
@@ -27,12 +27,17 @@ if TYPE_CHECKING:
 #: condition. Upstream evaluates that condition on every reorder and the test ends in
 #: `l2_dist(...).item()` (`plas/core.py:91-92`), so every iteration is a host synchronisation:
 #: 5398 of the full-size encode's 5469 syncs (PROGRESS.md B2.5). `vendor/plas` carries one local
-#: patch that samples the test instead (see `vendor/plas/VENDOR.md`); this is the window ffsplat
-#: passes. Chosen by measurement in PROGRESS.md C4: it removes 72% of the syncs (1.095 -> 0.304 per
-#: reorder on the real 512^2 grid) at a time difference the unseeded shuffle alone can produce, and
-#: no larger value pays. It applies on every device (the patch is device-agnostic); `1` restores
-#: upstream's per-reorder test, bit for bit.
-_PLAS_CHECK_EVERY = 4
+#: patch that samples the test instead (see `vendor/plas/VENDOR.md`), which removes those syncs.
+#:
+#: It is **off** (`1`, i.e. upstream's per-reorder test, bit for bit) because enabling it was
+#: measured to be slower at the grid that matters: at 1594² on MPS the host sync costs 1.40 ms of a
+#: 39.9 ms reorder (3.5%), while sampling every 4th reorder costs 7% more reorders, so PLAS goes
+#: from 279.3 s to 288.1 s (median of 3, alternating, PROGRESS.md C6). At 512² it is a wash and at
+#: 512² on CPU it is within that grid's run-to-run noise. The sync is not what PLAS spends its time
+#: on - its own tensor ops are, and `torch.compile` on the candidate-distance helper is the
+#: measured next lever (5.0x on that op, PROGRESS.md C5). `1` is therefore the shipped value; the
+#: mechanism is one constant away if a future grid or a cheaper reorder changes that trade.
+_PLAS_CHECK_EVERY = 1
 
 
 def convert_to_dtype(field_data: Tensor, dtype_str: str) -> Tensor:

@@ -20,11 +20,10 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-import pytest
-import torch
-
 import plas
 import plas.core as core
+import pytest
+import torch
 
 VENDOR = Path(__file__).resolve().parent.parent / "vendor" / "plas"
 
@@ -88,15 +87,15 @@ def test_solver_distance_is_the_cost_of_the_applied_permutation() -> None:
     assert torch.equal(best_perms_idx, perms[best])
     # independent reference: the residual of each destination position, i.e. C[best_idx[j], j]
     reference = (
-        cand_dists.gather(2, best_perms_idx.unsqueeze(-1).expand_as(cand_dists))
-        .diagonal(dim1=-2, dim2=-1)
-        .sum()
+        cand_dists.gather(2, best_perms_idx.unsqueeze(-1).expand_as(cand_dists)).diagonal(dim1=-2, dim2=-1).sum()
     )
     assert float(applied_dist) == pytest.approx(float(reference), rel=1e-6)
     # and it is the cost of the *inverse* row, which is not the minimum row in general
     assert perms_inv_rows.shape == (perms.shape[0],)
-    assert torch.equal(perms_inv_rows, torch.tensor(
-        [int((perms == torch.argsort(perms, dim=1)[p]).all(dim=1).nonzero()[0, 0]) for p in range(24)]))
+    assert torch.equal(
+        perms_inv_rows,
+        torch.tensor([int((perms == torch.argsort(perms, dim=1)[p]).all(dim=1).nonzero()[0, 0]) for p in range(24)]),
+    )
 
 
 def test_reorder_distance_is_the_post_reorder_total() -> None:
@@ -115,7 +114,7 @@ def test_batching_removes_the_per_iteration_sync() -> None:
     grid = _grid()
     syncs_1, reorders_1, _ = _sort(grid, check_every=1)
     syncs_4, reorders_4, _ = _sort(grid, check_every=4)
-    # upstream: two .item() calls per reorder, i.e. at least one sync per reorder
+    # upstream: `l2_dist(...).item()` on every reorder, plus one per block config
     assert syncs_1 >= reorders_1
     # patched: at most half a sync per reorder, i.e. at least 2x fewer syncs per reorder.
     # (The absolute counts are not compared: batching overshoots the stopping point, so a
@@ -144,8 +143,8 @@ def test_batching_removes_the_sync_on_mps() -> None:
     assert syncs_4 / reorders_4 < 0.5 * syncs_1 / reorders_1
 
 
-def test_sort_on_device_passes_the_tuned_check_every(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ffsplat's PLAS call site must use the batched test, not upstream's per-reorder default."""
+def test_sort_on_device_passes_the_module_check_every(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ffsplat's PLAS call site must pass ``_PLAS_CHECK_EVERY`` explicitly, not rely on a default."""
     from ffsplat.models import transformations as T
 
     seen: dict[str, object] = {}
@@ -158,3 +157,16 @@ def test_sort_on_device_passes_the_tuned_check_every(monkeypatch: pytest.MonkeyP
     T.PLAS._sort_on_device(torch.zeros(6, 4, 4), 1e-4, False)
     assert seen["check_every"] == T._PLAS_CHECK_EVERY
     assert seen["improvement_break"] == 1e-4
+
+
+def test_shipped_check_every_is_upstream_behaviour() -> None:
+    """The sampled test is shipped **off**, and that is a measured decision, not an oversight.
+
+    Enabling it removes 72% of PLAS's host syncs (1.095 -> 0.304 per reorder on the real 512^2
+    grid) but costs 7% more reorders at 1594^2, where the sync is only 3.5% of a reorder: PLAS
+    goes from 279.3 s to 288.1 s (median of 3, alternating). See PROGRESS.md C4/C5/C6. If you
+    change this constant, re-measure at 1594^2 - do not assume the 512^2 result carries.
+    """
+    from ffsplat.models import transformations as T
+
+    assert T._PLAS_CHECK_EVERY == 1
