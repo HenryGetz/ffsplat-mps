@@ -1356,3 +1356,114 @@ Tolerance logic and its limits, stated explicitly:
   exactly.
 * mpsplat on **CPU** and mpsplat on **MPS** differ from the reference by the same numbers to 6 decimal
   places, so the Metal kernels carry no additional error over the pure-torch path.
+
+---
+
+# Phase B — MPS performance
+
+## B1. Stage-timing breakdown (baseline, before any change)
+
+`stage_profile.py` runs the real encoder in-process and wraps each `Transformation.apply`, each
+`PLAS._sort_on_device`, each `KMeans.fit` and each `write_image`, bracketing every timed region with
+`ffsplat.device.synchronize(device)` so the numbers include the GPU wait (MPS work is asynchronous).
+GPU utilisation is sampled at 5 Hz from
+`ioreg -r -d 1 -w 0 -c IOAccelerator` (`"Device Utilization %"`, matched with a regex — the value sits
+inside a ~20-key `PerformanceStatistics` line) and averaged per run.
+
+Scene: `raw/truck/point_cloud_512.ply` (a 512x512 = 262 144-primitive real-truck subsample, exactly the
+SOG grid size, so no pruning happens). Profile `SOG-web`. 3 repeats after a warm-up structure; the
+median is reported and every individual run is listed.
+
+```
+$ .venv/bin/python stage_profile.py cpu raw/truck/point_cloud_512.ply SOG-web 3 base512
+  run 0: total 200.7s  PLAS sort=76.8  io_write=1.8  kmeans=121.9  preprocess=0.0  quantize=0.0  reindex/copy=0.0
+  run 1: total 151.3s  PLAS sort=51.5  io_write=1.8  kmeans=97.9   preprocess=0.0  quantize=0.0  reindex/copy=0.0
+  run 2: total 163.4s  PLAS sort=55.7  io_write=1.8  kmeans=105.8  preprocess=0.0  quantize=0.0  reindex/copy=0.0
+
+# median of 3 runs (s)
+  load(PLY decode)               0.13
+  PLAS sort                     55.72   runs=['76.8', '51.5', '55.7']
+  io_write                       1.82
+  kmeans                       105.80   runs=['121.9', '97.9', '105.8']
+  preprocess                     0.01
+  quantize                       0.04
+  reindex/copy                   0.00
+  TOTAL (encode)               163.43
+
+# nested detail (median, s)
+  image[avif]                    1.77
+  kmeans_fit[euclidean]        105.79
+  sort_with_plas                55.72
+  PLAS grid cells              262144
+  image_file[f_rest_centroids.avif]     0.801     <- 45% of all image time
+  image_file[means_bytes_0.avif]        0.176
+  image_file[f_dc.avif]                 0.144
+  image_file[quaternions.avif]          0.157
+  image_file[means_bytes_1.avif]        0.143
+  image_file[scales.avif]               0.120
+  image_file[f_rest_labels_bytes_0.avif] 0.085
+  image_file[f_rest_labels_bytes_1.avif] 0.078
+  image_file[opacities.avif]            0.062
+
+# GPU utilisation per run: 44.8% / 33.2% / 40.1%  (sampler overall n=2088 mean=39.9%)
+```
+
+```
+$ .venv/bin/python stage_profile.py mps raw/truck/point_cloud_512.ply SOG-web 3 base512
+  run 0: total 103.5s  PLAS sort=31.9  io_write=2.0  kmeans=69.5  preprocess=0.0  quantize=0.0  reindex/copy=0.0
+  run 1: total 100.3s  PLAS sort=30.0  io_write=1.9  kmeans=68.2  preprocess=0.0  quantize=0.0  reindex/copy=0.0
+  run 2: total  99.5s  PLAS sort=30.4  io_write=1.9  kmeans=67.1  preprocess=0.0  quantize=0.0  reindex/copy=0.0
+
+# median of 3 runs (s)
+  load(PLY decode)               0.13
+  PLAS sort                     30.37   runs=['31.9', '30.0', '30.4']
+  io_write                       1.95
+  kmeans                        68.21   runs=['69.5', '68.2', '67.1']
+  preprocess                     0.00
+  quantize                       0.03
+  reindex/copy                   0.00
+  TOTAL (encode)               100.26
+
+# nested detail (median, s)
+  image[avif]                    1.90
+  kmeans_fit[euclidean]         68.20
+  sort_with_plas                30.36
+  PLAS grid cells              262144
+  image_file[f_rest_centroids.avif]     0.851
+  image_file[means_bytes_0.avif]        0.196
+  image_file[quaternions.avif]          0.154
+  image_file[f_dc.avif]                 0.165
+  image_file[means_bytes_1.avif]        0.157
+  image_file[scales.avif]               0.118
+  image_file[f_rest_labels_bytes_0.avif] 0.080
+  image_file[f_rest_labels_bytes_1.avif] 0.098
+  image_file[opacities.avif]            0.085
+
+# GPU utilisation per run: 94.3% / 94.9% / 94.8%  (sampler overall n=1179 mean=94.6%)
+```
+
+What this says, before any optimisation:
+
+| stage | cpu | mps | mps/cpu | share of the mps encode |
+|---|---|---|---|---|
+| k-means fit + full assignment (euclidean, K=65536) | 105.8 s | **68.2 s** | 0.64x | **68%** |
+| PLAS sort (6-channel grid, 262 144 cells) | 55.7 s | 30.4 s | 0.55x | **30%** |
+| quantize / byte-split / reindex / reshaping | 0.05 s | 0.03 s | — | ~0% |
+| image encode (avif, 9 files) | 1.77 s | 1.90 s | 1.07x | 2% |
+| **total encode** | **163.4 s** | **100.3 s** | 0.61x | |
+
+* The encode is **two stages**: k-means (68%) plus PLAS (30%). Everything else is 2%.
+* The quantise/byte-split/reindex work that the port explicitly makes device-independent is ~0.05 s of
+  163 s — no optimisation there can matter.
+* **PLAS is faster on MPS than on CPU on the real data** (30.4 s vs 55.7 s at 512²). This contradicts the
+  earlier record's §1.7 table (29.8 s mps vs 5.1 s cpu at 256²), which used a **2-channel random** grid,
+  not the SOG-web template's real **6-channel** structured input (means -> signed-log -> 16-bit quantise
+  -> split bytes -> standardize). The measurement below (B2) settles it at the real grid size.
+* k-means run-to-run spread on CPU is ~25% (97.9-121.9 s) and on MPS ~3%; PLAS CPU spread is ~45%
+  (51.5-76.8 s) because PLAS's iteration count depends on unseeded internal shuffling. All later
+  comparisons use the median of ≥3 runs and note the spread.
+* The `ioreg` utilisation counter is **machine-wide**, so the 39.9% mean during the CPU run is the
+  desktop's compositor, not ffsplat. On the MPS run the encode itself keeps the GPU at **94.6%** mean,
+  i.e. the MPS encode is GPU-saturated on average — but that average hides the fact that the k-means
+  matmuls and the sort are only ~10-15% efficient in bandwidth terms (see B2), and that the 2% image
+  stage is pure CPU (the GPU goes idle there).

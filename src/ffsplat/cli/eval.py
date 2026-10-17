@@ -53,9 +53,7 @@ def rasterize_splats(
         backgrounds=None,
     )
     if use_white_background:
-        render_colors = render_colors + (1.0 - render_alphas) * torch.ones(
-            1, colors.shape[-1], device=colors.device
-        )
+        render_colors = render_colors + (1.0 - render_alphas) * torch.ones(1, colors.shape[-1], device=colors.device)
     if masks is not None:
         render_colors[~masks] = 0
     return render_colors, render_alphas, info
