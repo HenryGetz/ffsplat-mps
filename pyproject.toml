@@ -169,6 +169,12 @@ ignore = [
 [tool.ruff.format]
 preview = true
 
+[tool.deptry.package_module_name_map]
+# `mpsplat` is the Apple-Silicon distribution of the `gsplat` package (see `dependencies`); it is
+# not installed at all on other platforms, so deptry cannot infer the mapping from the environment
+# and would report the dependency as unused.
+mpsplat = "gsplat"
+
 [tool.deptry.per_rule_ignores]
 # torchvision is required for torchmetrics
 DEP002 = ["torchvision"]
