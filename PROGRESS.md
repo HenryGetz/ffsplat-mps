@@ -2135,6 +2135,25 @@ code comments only.
 
 # Phase C — PLAS: removing the per-iteration host sync (2026-10-17)
 
+> **NOT SHIPPED — measured net regression.** The work below was carried out in full, including a
+> vendored, patched copy of `plas` that removed 67-69% of the encode's host syncs and was verified
+> bit-for-bit equivalent to upstream at `check_every=1`. It was then **reverted**: enabling the
+> patch costs 7% more reorders at 1594² while the sync it removes is worth 3.5% of a reorder, so the
+> sort is 3.1% slower at the grid the real encode uses (C6). `macOS`/`apple-silicon` therefore
+> carries the **unpatched, pinned upstream `plas`** again, and `vendor/plas`,
+> `tests/test_plas_vendor.py` and `_PLAS_CHECK_EVERY` no longer exist.
+>
+> **Nothing in this section is deleted, because the finding is the deliverable**: it converts "the
+> sync is the ceiling" (B2.5/B4) from an assumption into a measurement, and it locates what the
+> 291.5 s really is. The implementation lives in git history at **`c5dc349`** (vendoring + first
+> form of the patch) and **`8bc3eee`** (the shipped form: upstream's early-exit test, sampled, with
+> the reorder's distance taken from the permutation solver), with the vendored tree recoverable from
+> either commit. **Licence verdict: Apache-2.0 — redistribution and modification are permitted**
+> (C1), so the revert is a design decision, not a licensing one.
+>
+> The measurement harnesses named below live in `ffsplat-fixtures/` (not in this repo) and import
+> the vendored tree by path, so re-running them needs a checkout of `8bc3eee`.
+
 B4 item 1 and B2.1 both ended with "not fixed", on the grounds that fixing it meant "patching a
 PyPI wheel" that "would not survive a clean clone". **Both of those statements were wrong**, and
 this section is the correction and the fix:

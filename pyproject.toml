@@ -37,9 +37,7 @@ dependencies = [
     "torchvision>=0.21.0,<1.0.0",
     "torchmetrics>=1.6.1,<2.0.0",
     "camorph @ git+https://github.com/Fraunhofer-IIS/camorph@2c95c8b15b0532d6280091761a9b51ab65cd2f98",
-    # PLAS, vendored (see vendor/plas/VENDOR.md): the copy carries one local patch that
-    # removes the per-iteration host sync from the sort's inner loop.
-    "plas==0.1",
+    "plas @ git+https://github.com/fraunhoferhhi/PLAS.git@4f1109c94f29a5a6de62bdf8f20cb3ce1ff0e680",
     "viser @ git+https://github.com/w-m/viser.git@03b87b8c1521a0afe79d885e684f1cb0b3323294",
 ]
 
@@ -48,9 +46,6 @@ dependencies = [
 # .metal shader sources are read from vendor/mpsplat (upstream MANIFEST.in does not
 # list them, so a built wheel could omit them).
 mpsplat = { path = "vendor/mpsplat", editable = true }
-# Same reasoning as mpsplat: the vendored PLAS copy is the dependency, so a clean clone
-# builds it from this tree (editable, so the patched source is what gets imported).
-plas = { path = "vendor/plas", editable = true }
 
 [tool.uv]
 # PLAS (github.com/fraunhoferhhi/PLAS) lists `lapjv` in install_requires, but its
@@ -112,10 +107,7 @@ warn_unused_ignores = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-# `gsplat` is the vendored mpsplat tree and `plas` the vendored PLAS tree; both are installed as
-# editable path sources, which mypy cannot resolve from site-packages, and neither ships type
-# information. Same treatment for both, rather than a `type: ignore` at each import.
-module = ["gsplat", "gsplat.*", "plas", "plas.*", "plyfile.*"]
+module = ["gsplat.*", "plyfile.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
