@@ -120,7 +120,7 @@ not by accident:
 |---|---|---|
 | PLY read/decode, `container_meta.yaml` + PLY write | **CPU** | file/parse work (numpy `fromfile` + tensor assembly); no GPU equivalent. The 630 MB full-size PLY parses in **0.46 s** (in-process: `decode_gaussians` 0.44 s + one host-to-device copy 0.07 s; measured with `perf_counter` around `decode_gaussians(..., '3DGS-INRIA.ply')`), so this stage is 0.1% of the encode |
 | remap / quantise / byte-split / reindex / flatten (the SOG codec's torch ops) | **GPU** | native MPS torch kernels; 0.13 s of the full-size encode |
-| PLAS spatial sort | **GPU** | **1.8x faster on MPS at 512², 2.2x at 1594²** on the template's real 6-channel input (30.4 s vs 55.7 s; 278.7 s vs 621.6 s). The CPU retry in `PLAS._sort_with_fallback` only fires if MPS raises, and never has |
+| PLAS spatial sort | **GPU** | **1.8x faster on MPS at 512², 2.2x at 1594²** on the template's real 6-channel input (30.4 s vs 55.7 s; 278.7 s vs 621.6 s). The CPU retry in `PLAS._sort_with_fallback` only fires if MPS raises, and never has. Upstream's per-reorder host sync is removed by the vendored patch (`vendor/plas/VENDOR.md`, `_PLAS_CHECK_EVERY`), which cuts it from 1.095 to 0.304 syncs per reorder on the real 512² grid; the stage's wall time is unchanged, because the sync is only ~12% of a reorder there and sampling the early-exit test costs a few percent more reorders - see *Where MPS is not optimized* |
 | k-means codebook, `euclidean` (SOG-web/-png) | **GPU** | `torch.cdist`; 22.3 s vs 66.4 s on CPU for the real codebook input. GPU utilisation **99.7%** |
 | k-means codebook, `manhattan` (SOG-PlayCanvas) | **GPU** | 48.0 s vs 38.2 s on CPU per assignment pass — the one stage where the CPU is faster (see *Where MPS is not optimized*) |
 | image encode (AVIF / PNG / WEBP) | **CPU** | `cv2.imwrite` / Pillow / pillow-heif are host code and there is no GPU codec in this stack; GPU utilisation during these windows is 26.7% (i.e. idle). 4.8 s of the full-size encode |
@@ -146,7 +146,7 @@ two silently drop rendering onto the torch fallback.
 | round-trip `PLY -> SOG-web -> PLY`, 2.54M primitives | works, all budgets | works, all budgets |
 | `ffsplat view` / `ffsplat live` (browser, `localhost:8080`) | n/a | works |
 | `ffsplat eval` (real Tanks&Temples COLMAP set, 32 images) | n/a | works, SSIM + LPIPS on MPS |
-| `pytest --doctest-modules` | 33 passed | 33 passed |
+| `pytest --doctest-modules` | 34 passed | 34 passed |
 | `mypy`, `deptry`, `ruff check`, `ruff format --check` | no new findings (mypy/deptry clean; the 5 ruff check findings and 3 `ruff format --check` complaints are pre-existing upstream lines, verified unchanged against `3fb6444`) | same |
 
 ### Parity vs CPU
@@ -219,6 +219,25 @@ on the real tensor captured from the encoder:
 The baseline row is kept only to show why it was misleading: a 2-channel random grid is not what the
 SOG templates feed PLAS, and it inverted the sign of the result.
 
+PLAS's per-reorder host sync (`l2_dist(...).item()`, 5398 of the full-size encode's 5469 syncs) can be
+removed, and `vendor/plas` implements the removal: upstream's early-exit test, sampled every
+`check_every` reorders, with the reorder's distance taken from the permutation solver that already
+computed it. Measured by alternating upstream and patched in one process, three rounds each, on the
+same captured grids:
+
+| grid / device | upstream | `check_every=4` | syncs per reorder | reorders |
+|---|---|---|---|---|
+| 512² MPS | 29.19 s | 28.99 s | 1.098 -> 0.303 | +9% |
+| 512² CPU | 49.91 s | 46.56 s | 1.097 -> 0.306 | +11% |
+| **1594² MPS** | **279.29 s** | **288.07 s** | 1.096 -> 0.310 | +7% |
+| 1594² CPU | 661.64 s | 652.40 s | 1.097 -> 0.309 | +6% |
+
+The sync is real - removing it takes a reorder from 39.9 ms to 38.5 ms at 1594² - but it is only 3.5%
+of a reorder there, while sampling the early-exit test costs 7% more reorders, so the sort is 3.1%
+*slower* at the grid the real encode uses. `_PLAS_CHECK_EVERY` is therefore **1** and the shipped
+configuration is upstream's, bit for bit (identical `grid_indices` and sorted parameters on both
+devices); see PROGRESS.md C4-C6 and `vendor/plas/VENDOR.md`.
+
 k-means codebook (the SOG-web input from a 512² real-truck scene, N=262,144, K=65,536, D=45, ten Lloyd
 iterations plus the full-data assignment):
 
@@ -280,12 +299,28 @@ builds viser's browser client (~45 s, once).
 
 ### Where MPS is not optimized
 
-1. **PLAS is 86% of the full-size encode (291.5 s of 339.4 s) and cannot be improved from this repo.**
-   It is already on the faster device (2.2x faster than the CPU at the real grid). The cost is upstream
-   `plas`: its inner loop calls `l2_dist(...)` which ends in `.item()` (`plas/core.py:91-92`) and branches
-   on that Python scalar, so **5398 of the encode's 5469 host syncs are PLAS's**, each one followed by a
-   burst of tiny kernels. Fixing it means patching a PyPI wheel (would not survive a clean clone) or a
-   Metal sort kernel.
+1. **PLAS is 86% of the full-size encode (291.5 s of 339.4 s), and the reason is its own tensor ops.**
+   It is already on the faster device (2.2x faster than the CPU at the real grid). Its inner loop does
+   evaluate its early-exit test with a host sync - `l2_dist(...)` ends in `.item()`
+   (`plas/core.py:91-92`), and **5398 of the encode's 5469 host syncs are PLAS's** - but that sync is
+   not where the time goes, and it has now been measured both ways:
+   * the sync costs **1.40 ms of a 39.9 ms reorder at 1594²** (3.5%). The kernels are not the cost
+     either: 16 tiny pointwise kernels on MPS cost 0.118 ms in total.
+   * the cost is two big ops per reorder - `gather` 1.303 ms and the candidate-distance tensor
+     1.127 ms of a 3.929 ms reorder at 512² - each materialising a `[1024, 6, 64, 4, 4]`
+     intermediate to move 1.5 M useful values.
+   * removing the sync is possible and is implemented (`vendor/plas`, `_PLAS_CHECK_EVERY`, one
+     constant), but **enabling it makes the encode slower**: at 1594² MPS the sampled early-exit
+     test costs 7% more reorders while saving 3.5% per reorder, so PLAS goes from 279.3 s to
+     288.1 s (median of 3, alternating). It is therefore shipped **off**.
+   * the measured next lever is `torch.compile` on the candidate-distance helper *alone*: **5.0x**
+     on that op (1.127 ms -> 0.224 ms), i.e. ~20% of PLAS. Compiling the whole reorder is 56x
+     *slower* (Inductor does not fuse the `einsum`/`argmin`/`gather` chain). Not adopted here: it
+     changes the summation order, hence possibly an `argmin`, hence the sort's output.
+
+   The claim that stood here before ("cannot be improved from this repo", "patching a PyPI wheel")
+   was wrong on both counts: `plas` is a *git* dependency and its licence is Apache-2.0, so it is
+   vendored and patched in `vendor/plas` - see [PROGRESS.md](PROGRESS.md) Phase C.
 2. **The `manhattan` k-means used by `SOG-PlayCanvas` is the only stage where the CPU beats the GPU:**
    48.0 s vs 38.2 s per assignment pass at the real shape (after the branch's own change; before it,
    56.8 s vs 118.2 s). L1 has no matmul identity, so the score matrix must be materialised by

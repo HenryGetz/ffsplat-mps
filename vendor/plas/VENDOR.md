@@ -92,7 +92,26 @@ clone at the pinned commit shows exactly these edits (78 changed lines including
 5. **`sort_with_plas(..., check_every=1)`** — plumbs the value through, documented in the
    docstring: `check_every` is the number of reorders between two evaluations of the early-exit
    test. The default is `1`, i.e. upstream behaviour, so the patch is opt-in at the call site
-   (`src/ffsplat/models/transformations.py` passes the tuned value).
+   (`src/ffsplat/models/transformations.py` passes `_PLAS_CHECK_EVERY`).
+
+## Shipped configuration: the patch is **off**
+
+`_PLAS_CHECK_EVERY` is **1**, so ffsplat runs upstream's per-reorder test and this copy behaves
+exactly like the pinned dependency. That is a measured decision, not an oversight:
+
+| grid / device | upstream | `check_every=4` | syncs/reorder |
+|---|---|---|---|
+| 512² MPS | 29.19 s | 28.99 s | 1.098 -> 0.303 |
+| 512² CPU | 49.91 s | 46.56 s | 1.097 -> 0.306 |
+| **1594² MPS** | **279.29 s** | **288.07 s** | 1.096 -> 0.310 |
+
+(median of 3, alternating in one process; PROGRESS.md C6.) The sync is real - removing it takes a
+reorder from 39.9 ms to 38.5 ms at 1594² - but it is only 3.5% of a reorder there, while sampling
+the early-exit test costs 7% more reorders, so the sort is **3.1% slower at the grid that
+matters**. At 512² the two effects cancel; the CPU difference is inside that grid's run-to-run
+noise. The mechanism is kept because it is verified (bit-for-bit at `check_every=1`, PROGRESS.md
+C3), because it is what makes the *diagnosis* in C4/C5 measurable, and because it is one constant
+away if a future grid or a cheaper reorder changes the trade.
 
 Everything stays `float32` and device-agnostic: the patched path uses only `torch.min`,
 `torch.argsort`, `sum`, `gather` and `.item()`, all of which behave the same on CPU, CUDA and MPS.

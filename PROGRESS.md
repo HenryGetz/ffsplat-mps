@@ -1661,10 +1661,18 @@ unrepresentative; it is kept in the record as the pre-measurement baseline and l
 
 The remaining PLAS cost is *inside upstream `plas`*: its inner loop calls `l2_dist(...)` which ends in
 `.item()` (`plas/core.py:91-92`) and then branches on that Python scalar, so every iteration is a host sync
-plus a burst of tiny kernels. Fixing that means patching a third-party wheel, which would not survive a clean
-clone (`plas==0.1` comes from PyPI), so it is **reported, not patched**. `torch.compile` cannot help either:
-the `.item()` is a graph break and MPS Inductor never fuses matmul
-(`torch/_inductor/kernel/mm_common.py:211`).
+plus a burst of tiny kernels. `torch.compile` cannot help either: the `.item()` is a graph break and MPS
+Inductor never fuses matmul (`torch/_inductor/kernel/mm_common.py:211`).
+
+> **Superseded by Phase C (below).** Two claims in the paragraph above are wrong, and one is
+> incomplete. (i) `plas` is not a PyPI wheel: `pyproject.toml` pins it to
+> `git+https://github.com/fraunhoferhhi/PLAS.git@4f1109c9`, and its licence is Apache-2.0, so it
+> *can* be vendored and patched - which is what Phase C does. (ii) The `.item()` is not a graph
+> break any more once the test is sampled, and MPS Inductor *does* help the one op that dominates
+> the reorder (measured in C6). (iii) "at its ceiling" was the right conclusion from the wrong
+> reason: PLAS is 86% of the encode because the reorder's own tensor ops dominate it, not because
+> of the sync - the sync turns out to be below the measurement noise (C5). The sentence is left
+> here as the pre-Phase-C record.
 
 At the full grid PLAS is therefore ~279 s of a ~426 s full-size MPS encode (**~65%**), and the honest
 statement is: *that stage is at its ceiling for this stack*.
@@ -1944,8 +1952,10 @@ PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 ...    real 52.00
    device (2.2x faster than CPU at the 1594² real grid, B2.1), so this is not a device-selection
    problem: it is upstream `plas`'s per-iteration `l2_dist(...).item()` host sync
    (`plas/core.py:91-92`, 5398 of the encode's 5469 host syncs, B2.5) followed by a burst of tiny
-   kernels. Fixing it means patching a PyPI wheel (does not survive a clean clone) or a Metal kernel
-   for the sort. **Not fixed.**
+   kernels. *Phase C removed that sync and measured the result: it is below the noise floor, because
+   the reorder's own tensor ops are what the 291.5 s is spent on. See C5/C6.* Fixing it means patching a PyPI wheel (does not survive a clean clone) or a Metal kernel
+   for the sort. **Not fixed** - see Phase C: the sync *is* removable (and was removed), but it is
+   not what the 291.5 s is spent on; the reorder's own ops are (C5/C6).
 2. **manhattan k-means (SOG-PlayCanvas profile only) — the one stage where the GPU is slower than the
    CPU.** One full assignment pass at the real PlayCanvas shape (N=262144, K=65536, D=45):
    MPS 47.98 s vs CPU 38.24 s (1.26x slower) after this branch's change (before it: 56.83 s vs 118.19 s).
@@ -2120,3 +2130,349 @@ several numbers. Each of those is corrected in the commit that adds this section
 
 Nothing in this section changes executable behaviour: the commit that adds it touches documentation and
 code comments only.
+
+---
+
+# Phase C — PLAS: removing the per-iteration host sync (2026-10-17)
+
+B4 item 1 and B2.1 both ended with "not fixed", on the grounds that fixing it meant "patching a
+PyPI wheel" that "would not survive a clean clone". **Both of those statements were wrong**, and
+this section is the correction and the fix:
+
+* `plas` is **not** a PyPI dependency. `pyproject.toml` pinned it as
+  `plas @ git+https://github.com/fraunhoferhhi/PLAS.git@4f1109c94f29a5a6de62bdf8f20cb3ce1ff0e680`,
+  and `.venv/.../plas-0.1.dist-info/direct_url.json` records exactly that VCS origin.
+* Its licence is **Apache-2.0**, which permits redistribution and modification. So a vendored,
+  patched copy is both legal and shippable.
+
+## C1. Licence and provenance check (the gate the brief asked for first)
+
+Upstream `LICENSE` at the pinned commit, fetched and compared byte-for-byte against the licence the
+installed package shipped:
+
+```
+$ curl -sL https://raw.githubusercontent.com/fraunhoferhhi/PLAS/4f1109c94f29a5a6de62bdf8f20cb3ce1ff0e680/LICENSE -o /tmp/plas_upstream_LICENSE.txt
+$ head -3 /tmp/plas_upstream_LICENSE.txt
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+$ wc -l /tmp/plas_upstream_LICENSE.txt
+201 /tmp/plas_upstream_LICENSE.txt
+$ diff /tmp/plas_upstream_LICENSE.txt .venv/lib/python3.13/site-packages/plas-0.1.dist-info/licenses/LICENSE
+IDENTICAL
+```
+
+Upstream has no `NOTICE` file (HTTP 404 at that commit). The three runtime files are byte-identical
+to what the pinned dependency installed, so the copy is faithful:
+
+```
+$ for f in plas/core.py plas/vad.py plas/__init__.py setup.py README.md; do
+    curl -sL https://raw.githubusercontent.com/fraunhoferhhi/PLAS/4f1109c9.../$f -o /tmp/up_$f; done
+$ diff /tmp/up_plas_core.py .venv/.../plas/core.py && echo "core.py IDENTICAL"
+core.py IDENTICAL
+$ diff /tmp/up_plas_vad.py  .venv/.../plas/vad.py && echo "vad.py IDENTICAL"
+vad.py IDENTICAL
+```
+
+**Decision: vendoring is permitted, so the fix is shippable.** The copy lives in `vendor/plas`
+(with `vendor/plas/VENDOR.md` carrying the provenance, the pinned commit, the Apache-2.0 notice and
+a description of every local edit), and `pyproject.toml` now points the `plas` distribution at it
+with a uv *editable* path source - the same shape as the existing `vendor/mpsplat` wiring, so a
+clean `uv sync` builds and imports the patched source with no dependence on the upstream
+repository. `vendor/mpsplat` is untouched and stays byte-identical.
+
+Verified after the vendoring, from the tree that is committed:
+
+```
+$ diff -q /tmp/up_plas___init__.py vendor/plas/plas/__init__.py && echo "plas/__init__.py identical"
+plas/__init__.py identical
+$ diff -q /tmp/up_plas_vad.py vendor/plas/plas/vad.py && echo "plas/vad.py identical"
+plas/vad.py identical
+$ diff -q /tmp/up_setup.py vendor/plas/setup.py && echo "setup.py identical"
+setup.py identical
+$ diff -q /tmp/plas_upstream_LICENSE.txt vendor/plas/LICENSE && echo "LICENSE identical"
+LICENSE identical
+$ diff -q /tmp/up_README.md vendor/plas/README.md && echo "README.md identical"
+README.md identical
+```
+
+`uv.lock`'s only change is the source and the recorded metadata; the macOS-only `lapjv` override
+survives it, and `import lapjv` still fails as before:
+
+```
+$ git diff HEAD~1 -- uv.lock | grep -E "^[+-]" | grep -v "^[+-][+-]"
+-    { name = "plas", git = "https://github.com/fraunhoferhhi/PLAS.git?rev=4f1109c94f29a5a6de62bdf8f20cb3ce1ff0e680" },
++    { name = "plas", editable = "vendor/plas" },
+-source = { git = "https://github.com/fraunhoferhhi/PLAS.git?rev=4f1109c9...#4f1109c9..." }
++source = { editable = "vendor/plas" }
+$ sed -n '1554,1556p' uv.lock
+dependencies = [
+    { name = "click" },
+    { name = "kornia" },
+    { name = "lapjv", marker = "sys_platform != 'darwin'" },
+$ .venv/bin/python -c "import lapjv"
+ModuleNotFoundError: No module named 'lapjv'
+```
+
+## C2. The patch
+
+`vendor/plas/plas/core.py` is upstream's file with ~77 changed lines (including comments); the full
+description is in `vendor/plas/VENDOR.md`. In outline:
+
+1. `solve_assignments_batch_dim` returns the winning permutation's cost as well as its index -
+   `torch.min` instead of `torch.argmin`, so the value is one `argmin` discards, and it is read out
+   of the per-permutation costs the solver has already computed. No extra pass, no extra sync.
+2. `get_permutations` also returns the row index of each permutation's *inverse*.
+3. `reorder_blocky_shuffled` returns that cost as a third value.
+4. `reorder_plas` keeps upstream's early-exit test (`1 - d(i) / d(i-1)`, the improvement of the
+   last reorder) but **samples** it: it runs after the first reorder - exactly where upstream runs
+   it, which is what `has_improved` and the outer loop's "give up after a few configs" rule are
+   calibrated on - and then once every `check_every` reorders. `check_every` is the tunable N of
+   the brief's candidate (i).
+5. `sort_with_plas(..., check_every=1)` plumbs it through; the default is upstream behaviour, and
+   `src/ffsplat/models/transformations.py` passes `_PLAS_CHECK_EVERY` explicitly.
+
+Two things make the sync disappear rather than merely get rarer:
+
+* **The distance is free.** The reorder hands back `d(i)`, read out of the per-permutation costs the
+  solver already had (`torch.min`), so the loop no longer pays a second full pass over the grid per
+  reorder - upstream's own TODO in that file ("perf: distance calculation done for the whole array
+  after sorting for early breaking; we do the distance calculation already for the sorting, so we
+  could use that").
+* **The ratio is formed on the device.** `d(i-1)` is the value the previous reorder returned, so
+  `1 - d(i)/d(i-1)` needs no host round trip; the loop's only `.item()` is the one that reads the
+  finished comparison back, once per `check_every` reorders.
+
+`prev_dist` stays a Python `float` and upstream's `l2_dist` in the `check_every == 1` branch, so
+that setting costs exactly what upstream costs and its values are upstream's, bit for bit.
+
+The distance the solver hands back is `perms_dist` at the **inverse** row of the winning
+permutation, not at the winning row. `reorder_blocky_shuffled` applies the mapping "destination
+position `j` takes the value from shuffled source `perm[j]`", whose cost is `sum_j C[perm[j], j]`;
+the solver minimises `sum_c C[c, perm[c]]`. The 24 permutations are closed under inversion so both
+rows share the same minimum, but they are different rows with different costs - measured on random
+blocks, the applied reorder costs **54.28** where the solver's own objective minimum is **34.75**.
+Taking the winning row instead of the inverse row is a ~35% error in the early-exit test, and the
+first version of this patch made exactly that mistake; `tests/test_plas_vendor.py` now pins it.
+
+That observation is also the answer to "is there a better idea in the code": upstream's reorder
+does not achieve the improvement its own solver found, because the permutation is applied
+transposed relative to the solver's objective. Applying the inverse would improve more per reorder -
+but it changes the sorted output, so it is **reported, not changed**.
+
+### C2a. The designs that were measured and rejected first
+
+Three designs were implemented and measured before the shipped one; the measurements are why the
+shipped one looks the way it does.
+
+* **Fixed window, geometric-mean test.** Break when the *mean* per-reorder improvement over the
+  window falls below `improvement_break`. This removes the sync but overshoots the stopping point
+  badly: the improvement does not decay smoothly, it hovers around the threshold (traced on the
+  real 512² grid: a single block config runs 2730 reorders with `improvement_factor` between
+  1.0e-4 and 1.5e-4), so requiring a whole window's mean to fall below the threshold needs several
+  consecutive sub-threshold reorders and the loop runs far longer. On the real 512² grid at
+  `check_every=4` it did **7932 reorders against upstream's 6654 (+19%)** for a per-reorder gain of
+  8%, and at `check_every=8` **9048 (+36%)** for 22% - the sort got *slower* end to end.
+* **Adaptive window with the geometric-mean test.** Shrink the window towards 1 as the improvement
+  approaches the threshold, so the mean test only batches where it is far from stopping. It cut the
+  overshoot (32²: +113% -> +30% reorders) but the long tail described above is exactly where the
+  reorders are, and there the window is 1 by construction, so it removed only ~17% of the syncs on
+  the real grid.
+* **Adaptive window with the per-reorder test.** The right test (upstream's), but the same problem:
+  the tail dominates, so the sync rate stayed at ~0.9 per reorder.
+
+The shipped design is therefore the *simplest* form: upstream's per-reorder test, sampled at a
+fixed `check_every`, with the free solver distance. It is the only one of the four that actually
+removes the syncs (measured 0.116 syncs/reorder at `check_every=16`, C4), and its cost - a few
+percent more reorders - is measurable and bounded.
+
+## C3. `check_every=1` is a bit-for-bit no-op (measured)
+
+`ffsplat-fixtures/plas_patch_equivalence.py` loads the unpatched upstream `plas/core.py` (pinned
+commit, byte-identical to the pinned dependency) as a standalone module and compares it against the
+vendored copy on the real captured SOG-web grids, seeded so both are deterministic. It reports
+whether the returned `grid_indices` **and** the sorted parameters are identical:
+
+```
+$ .venv/bin/python plas_patch_equivalence.py 202
+# upstream ref: plas_upstream_4f1109c_core.py
+# vendored    : /Users/henrygetz/Downloads/ffsplat/vendor/plas/plas/__init__.py
+  202 cpu check_every=1  upstream    9.30s  vendored    9.87s  grid_indices identical=True  sorted params identical=True  (must be True)
+  202 cpu check_every=4  upstream    9.36s  vendored   11.36s  grid_indices identical=False  sorted params identical=False  (heuristic: may differ)
+  202 mps check_every=1  upstream   24.91s  vendored   22.20s  grid_indices identical=True  sorted params identical=True  (must be True)
+  202 mps check_every=4  upstream   20.11s  vendored   15.14s  grid_indices identical=False  sorted params identical=False  (heuristic: may differ)
+```
+
+`check_every=1` reproduces upstream exactly, on CPU and on MPS. `check_every=4` does not, and is not
+supposed to: it performs a different number of reorders (see C4), so the unseeded shuffle diverges
+from that point. This is the heuristic change the brief allows, not a correctness change - the
+reorders, the permutation solver, the low-pass target and the applied permutation are untouched.
+
+## C4. What the sync actually costs: a sweep of `check_every` on the real 512² grid
+
+`ffsplat-fixtures/plas_sweep.py` runs upstream and every cap **once per round, round by round**, in
+one process on the real captured 6-channel grid, so the machine's state is shared by every variant.
+Three rounds. Reorders and host syncs are counted by wrapping `plas.core.reorder_blocky_shuffled`
+(one call per reorder) and `torch.Tensor.item`:
+
+```
+$ .venv/bin/python plas_sweep.py 512 mps 1,4,8,16,32 3
+# 512 mps  262144 cells  caps=[1, 4, 8, 16, 32]  rounds=3  improvement_break=1e-4
+# round 1/3 done
+# round 2/3 done
+# round 3/3 done
+
+  upstream           median   28.60s  runs=['29.1', '28.4', '28.6']  reorders=[6566, 6567, 6576]  syncs=[7199, 7177, 7191]  4.355 ms/reorder  1.095 syncs/reorder
+  check_every=1      median   29.51s  runs=['29.9', '29.1', '29.5']  reorders=[6886, 6609, 6674]  syncs=[7513, 7246, 7331]  4.422 ms/reorder  1.098 syncs/reorder
+  check_every=4      median   28.84s  runs=['29.2', '28.8', '28.7']  reorders=[7406, 7267, 7216]  syncs=[2249, 2203, 2206]  3.969 ms/reorder  0.304 syncs/reorder
+  check_every=8      median   29.71s  runs=['29.5', '29.9', '29.7']  reorders=[7575, 7644, 7563]  syncs=[1373, 1393, 1375]  3.922 ms/reorder  0.182 syncs/reorder
+  check_every=16     median   31.84s  runs=['32.4', '31.7', '31.8']  reorders=[8398, 8215, 8195]  syncs=[973, 955, 950]  3.876 ms/reorder  0.116 syncs/reorder
+  check_every=32     median   35.83s  runs=['35.3', '36.4', '35.8']  reorders=[9349, 9446, 9353]  syncs=[731, 735, 735]  3.831 ms/reorder  0.079 syncs/reorder
+```
+
+Three things follow, and they are the whole finding.
+
+1. **The sync is real and it is worth ~0.5 ms per reorder.** Going from 1.095 syncs/reorder to 0.079
+   takes the reorder from 4.355 ms to 3.831 ms: **0.524 ms saved for 1.016 syncs removed, i.e.
+   ~0.52 ms per host sync, 12% of the per-reorder cost.** The improvement is monotone in the sync
+   count, which is what makes it attributable rather than noise.
+2. **Sampling the early-exit test costs more reorders than that.** The stopping point overshoots by
+   up to `check_every - 1` reorders per inner loop, and most of PLAS's reorders are in a long tail
+   where the improvement hovers just above `improvement_break`, so the overshoot is real work:
+   6566 -> 7216 reorders at `check_every=4` (+10%), 8398 at 16 (+28%), 9349 at 32 (+42%).
+3. **So the end-to-end sort is not faster.** At `check_every=4` the median is 28.84 s against
+   upstream's 28.60 s, i.e. within the run-to-run spread the *unseeded* shuffle already gives
+   (upstream's own three runs span 0.7 s, and the patched `check_every=1`, which is bit-for-bit
+   upstream, measures 29.51 s). Above that it is a regression: 29.71 s at 8, 31.84 s at 16,
+   35.83 s at 32.
+
+`_PLAS_CHECK_EVERY` is therefore **4**: the largest sync reduction that is measured to be free
+(1.095 -> 0.304 syncs/reorder, -72%) at a time difference that the unseeded shuffle alone can
+produce. The measured cost of the host sync at this grid is ~0.5 ms of a 4.4 ms reorder, and the
+sampling overhead crosses over at about `check_every=4`; there is no cap that wins.
+
+`check_every=1` measures 3.2% slower than upstream's own code path here even though the two are
+bit-for-bit identical (C3) - which is the cleanest available statement of this grid's run-to-run
+noise floor: the unseeded shuffle changes the reorder count by a few percent from run to run
+(6566-6886 across the runs above), and wall time follows it.
+
+## C5. Per-op breakdown: what the 291.5 s is actually spent on
+
+`ffsplat-fixtures/plas_kernel_breakdown.py`, on the real 512² blocky shape (1024 blocks, 6
+channels, block_size 16), under `torch.inference_mode()` - which is what `sort_with_plas` runs
+under - each op measured in a saturated loop with a single synchronisation at the end:
+
+```
+# 1. pure MPS launch overhead (saturated, one sync at the end, inference_mode)
+    one tiny pointwise kernel (1000 elems)                     0.009 ms
+    one large pointwise kernel (1e6 elems)                     0.059 ms
+    16 tiny pointwise kernels (what one reorder is made of)    0.118 ms
+    => launch overhead per kernel ~= 0.009 ms
+
+## 1024 blocks (6 channels, block_size=16)
+  2. per-op GPU time inside one reorder
+    torch.randperm(256, device=mps)                            0.141 ms
+    index_select params+target by cand                         0.509 ms
+    squared_l2_distance_with_batch_dim (C)                     1.127 ms
+    einsum('bsce,pce->bsp')                                    0.304 ms
+    torch.argmin(perms_dist)  [upstream]                       0.062 ms
+    torch.min(perms_dist)     [the patch's addition]           0.080 ms
+    index_select perms[best]                                   0.053 ms
+    gather params by best_positions_exp                        1.303 ms
+    gather grid_indices                                        0.061 ms
+    index_put params[:, :, cand_flat] = best_values            0.237 ms
+    grid_indices_blocky_flat.contiguous()                      0.000 ms
+  3. the whole reorder
+    reorder_blocky_shuffled                                    3.929 ms
+    reorder_blocky_shuffled + one host sync (upstream's shape) 7.173 ms
+    => the sync costs +3.244 ms of 7.173 ms per reorder
+  4. torch.compile
+    squared_l2_distance_with_batch_dim compiled                0.224 ms
+    reorder_blocky_shuffled compiled                         221.499 ms
+```
+
+Read that with one caveat: **the `+3.244 ms` in section 3 is a saturated-loop artifact and is
+wrong.** In that loop the CPU enqueues the whole reorder before the sync, so the sync absorbs the
+enqueue *and* the drain; in the real sort the two overlap and the same sync costs **0.52 ms**
+(C4). The per-op numbers in section 2 are consistent with the real thing: they sum to 3.9 ms,
+which is exactly the 3.929 ms measured for the whole reorder and the 3.969 ms/reorder the sweep
+attributes to `check_every=4`.
+
+What that says about the ceiling:
+
+* **Launch overhead is not it.** One tiny pointwise kernel on MPS costs **9 µs**, and the 16 that
+  make up a reorder cost 0.118 ms - 3% of the reorder. B2.5's "a burst of tiny kernels" is real but
+  cheap; the kernels themselves are doing work.
+* **Two ops are 62% of the reorder**: `gather params by best_positions_exp` (1.303 ms) and the
+  candidate-distance tensor `squared_l2_distance_with_batch_dim` (1.127 ms). Both materialise a
+  `[1024, 6, 64, 4, 4]`-shaped intermediate (6.3 M elements, 25 MB) to move 1.5 M useful values.
+  `index_select` of params and target is another 0.509 ms.
+* **`torch.compile` helps exactly one of them, a lot.** Compiled, the candidate-distance helper
+  drops from 1.127 ms to **0.224 ms (5.0x)**. Compiling the whole reorder is a disaster (221 ms,
+  Inductor does not fuse the `einsum`/`argmin`/`gather` chain), so the lever is the pointwise
+  helper, not the function. It is **not adopted here**: it changes the tensor's summation order,
+  which can flip an `argmin` and therefore the sort's output, and it is a different change from the
+  one this section is about. It is the concrete next step, with a measured 5x on the single
+  biggest op - i.e. ~20% of PLAS's wall time, ~17% of the encode.
+
+## C6. Before/after, real grids, both devices (acceptance #1)
+
+`ffsplat-fixtures/plas_before_after.py 4 3` runs upstream and the patched copy **alternately**,
+round by round, in one process on the captured grids, three rounds each. Reorders and host syncs are
+counted as in C4:
+
+```
+$ .venv/bin/python plas_before_after.py 4 3
+# before/after: upstream plas 4f1109c9 vs vendored check_every=4; 3 alternating repeats
+
+## 512^2 (262144 cells) mps
+  BEFORE (upstream)  median   29.19s  runs=['29.2', '29.4', '28.7']  reorders=[6655, 6797, 6578]  syncs=[7310, 7442, 7226]  4.386 ms/reorder  1.098 syncs/reorder
+  AFTER (vendored)   median   28.99s  runs=['29.0', '28.6', '29.7']  reorders=[7280, 7176, 7485]  syncs=[2207, 2172, 2274]  3.982 ms/reorder  0.303 syncs/reorder
+
+## 512^2 (262144 cells) cpu
+  BEFORE (upstream)  median   49.91s  runs=['45.3', '55.3', '49.9']  reorders=[6518, 6540, 6529]  syncs=[7157, 7163, 7172]  7.644 ms/reorder  1.097 syncs/reorder
+  AFTER (vendored)   median   46.56s  runs=['46.6', '57.2', '46.3']  reorders=[7076, 7242, 7399]  syncs=[2144, 2214, 2233]  6.429 ms/reorder  0.306 syncs/reorder
+
+## 1594^2 (2540836 cells) mps
+  BEFORE (upstream)  median  279.29s  runs=['278.7', '279.7', '279.3']  reorders=[6998, 6987, 7071]  syncs=[7670, 7662, 7768]  39.910 ms/reorder  1.096 syncs/reorder
+  AFTER (vendored)   median  288.07s  runs=['287.0', '288.1', '288.3']  reorders=[7474, 7481, 7482]  syncs=[2329, 2309, 2316]  38.507 ms/reorder  0.310 syncs/reorder
+
+## 1594^2 (2540836 cells) cpu
+  BEFORE (upstream)  median  661.64s  runs=['695.4', '661.6', '584.2']  reorders=[7073, 7070, 6968]  syncs=[7767, 7755, 7666]  93.584 ms/reorder  1.097 syncs/reorder
+  AFTER (vendored)   median  652.40s  runs=['704.9', '652.4', '603.7']  reorders=[7601, 7498, 7439]  syncs=[2348, 2314, 2306]  87.010 ms/reorder  0.309 syncs/reorder
+```
+
+**The 1594² MPS row is the one that decides it.** Its runs are tight (278.7/279.7/279.3 against
+287.0/288.1/288.3), and it says the patched sort is **3.1% slower** (288.07 s against 279.29 s) at
+the grid the real encode uses, even though each reorder is cheaper (38.507 ms against 39.910 ms):
+the sync removal saves 1.40 ms per reorder, and sampling the early-exit test costs 476 extra
+reorders (6998 -> 7474, +7%) at ~38.5 ms each. That arithmetic is the whole trade:
+
+| | 1594² MPS |
+|---|---|
+| syncs removed per reorder | 0.786 |
+| saved by removing them | 0.786 x 1.78 ms = **1.40 ms/reorder** (~7000 x 1.40 ms = 9.8 s) |
+| extra reorders | +476 (+6.8%) |
+| paid for them | 476 x 38.5 ms = **18.3 s** |
+| net | **+8.5 s** (measured +8.8 s) |
+
+At 512² MPS the two effects cancel (28.99 s against 29.19 s). Both CPU rows measure the patched copy
+*faster* (6.7% at 512², 1.4% at 1594²) with a per-reorder gain of 16% and 7%, and both are
+unresolvable: their runs span 45.3-57.2 s and 584.2-704.9 s respectively, i.e. the CPU timings on
+this machine move by more between two runs of the *same* command than the whole effect. The
+1594² MPS row is tight enough to decide, and it decides against. No cap wins either way: the sweep
+in C4 shows the reorder count rising faster than the sync count falls at every value above 1.
+
+One caveat on the CPU rows, since they are the only place the patch looks like a win: the CPU side
+does show a larger per-reorder gain than MPS (87.0 against 93.6 ms/reorder at 1594², 7%) because
+`.item()` on CPU is a real synchronisation there too, and `reorder_blocky_shuffled` is the same
+Python code either way - but 5%-wide medians cannot carry that claim, and this branch's target
+device is MPS. If a future change makes the reorder cheaper (C5), the balance moves towards the
+patch and this should be re-measured rather than assumed.
+
+**Decision: `_PLAS_CHECK_EVERY = 1`.** The sampled test is shipped **off**, i.e. the vendored copy
+behaves exactly like the pinned dependency, because enabling it is a measured regression at the
+only grid that matters. `tests/test_plas_vendor.py::test_shipped_check_every_is_upstream_behaviour`
+pins that and says why. The mechanism is kept because it is verified bit-for-bit at
+`check_every=1` (C3), because it is what made C4/C5 measurable, and because it is one constant away
+if a future grid or a cheaper reorder changes the trade.
