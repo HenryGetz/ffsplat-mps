@@ -780,7 +780,9 @@ opacity 0.039440, scale_0 0.269486, f_dc_2 0.082205, f_rest_44 mean/range 0.0083
 the MPS path is numerically equivalent to CPU, and the only difference is the container size
 (32,994,991 B vs 32,984,494 B) from PLAS's unseeded shuffling.
 
-**MPS is faster than CPU for the full encode**: 663.8 s vs 863.6 s.
+**MPS is faster than CPU for the full encode**: 663.8 s vs 863.6 s. *(Both figures are the original
+port's pre-optimisation measurements - the 663.8 s run was taken while other work was running on the
+machine. They are kept as the historical record; the like-for-like numbers at HEAD are in B3.)*
 
 ### 3.1 Runtime proof: no reachable CUDA path on MPS
 
