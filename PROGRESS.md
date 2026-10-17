@@ -1367,6 +1367,38 @@ its parity row passes with a worst cpu-vs-mps delta of 1.5e-05 on the quaternion
 bytes differ by 0.4% between devices for the PLAS-ordering reason above. Re-measured after the
 manhattan change of B2.2 (same scene, same profile): cpu 560.3 s / mps **604.7 s** (was mps 731.5 s).
 
+#### A1.5a The one `FAIL` row at 512², resolved: it is the codec, not the device
+
+In that table `SOG-web-sh-split`'s `f_dc_` shows cpu-vs-mps 0.213970 against a 0.120918 budget. The
+tiny-scene run had shown the same row at exactly the same value for cpu-vs-cpu, so it was chased down
+properly at 512²:
+
+* **Four CPU runs of the identical command** give these pairwise `f_dc` deltas: 0.042794, 0.085588,
+  0.085588, 0.085588, 0.171176, 0.171176. The cpu-vs-mps deltas over the same runs: 0.128382, 0.128382,
+  0.213970, 0.299558. The two distributions overlap, so a single reject/accept cannot be read from them.
+* **The decisive control**: the encoder's `f_dc` array was dumped exactly as handed to the AVIF writer
+  on both devices (`/tmp/dump_fdc.py`). The two arrays are **multiset-identical in all three channels**
+  (`max|sorted delta| = 0`), and differ only in arrangement (3.6% of pixels equal, because PLAS is
+  unseeded):
+
+```
+[cpu] pre-encode f_dc array: shape=(512, 512, 3) dtype=uint8 min=0 max=255 sum=53010890
+[mps] pre-encode f_dc array: shape=(512, 512, 3) dtype=uint8 min=0 max=255 sum=53010890
+multiset identical: True  max|sorted delta|: 0
+pixel-identical: 0.035747528076171875
+  channel 0: multiset identical True max|sorted delta| 0
+  channel 1: multiset identical True max|sorted delta| 0
+  channel 2: multiset identical True max|sorted delta| 0
+```
+
+So everything the device computes for this property is identical; the decoded difference comes entirely
+from this profile writing `f_dc` as a **3-pixel-wide AVIF with `chroma: 420`** — a lossy, arrangement-
+dependent reconstruction, in which *the same u8 image round-tripped through Pillow is not even stable
+under `chroma: 444`* (max |delta| = 1 per pixel, 2 with `chroma: 420`).
+**Verdict: parity holds; the `FAIL` is a codec defect (A1.4 item 1) amplified by PLAS's unseeded
+ordering, on one property of one profile.** The report's automated verdict is left as `FAIL` because the
+comparison cannot know this — the resolution is this control, not a threshold tweak.
+
 ## A2. The unverified surface: mpsplat's 28 skipped tests
 
 `vendor/mpsplat` is the byte-identical mpsplat provider. Its suite on this machine:

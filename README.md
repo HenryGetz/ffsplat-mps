@@ -145,17 +145,21 @@ mean/median error statistics agree between devices:
 | SOG-web | 4,508,343 / 4,510,184 | `f_rest` 0.0362 (mean/range) | 0.05 | PASS |
 | SOG-web-png | 4,845,133 / 4,847,738 | `f_rest` 0.0362 (mean/range) | 0.05 | PASS |
 | SOG-web-nosh | 2,912,255 / 2,911,156 | `f_dc` 0.0856 | 0.1209 | PASS |
-| SOG-web-sh-split | 5,877,576 / 5,878,134 | `f_dc` 0.1475 = the cpu-vs-cpu rerun value exactly | 0.0951 | PASS (codec non-determinism, not the device) |
+| SOG-web-sh-split | 5,877,576 / 5,878,134 | `f_dc` 0.2140 (0.0428-0.1712 for the same measurement between four CPU runs) | 0.0951 | PASS by control: the encoder's quantised `f_dc` image is multiset-identical across devices (max abs sorted delta 0); the decoded difference comes only from this profile's lossy `chroma: 420` 3-pixel-wide AVIF — see PROGRESS A1.5a |
 | SOG-PlayCanvas | 5,270,706 / 5,248,634 | `rot` 0.000015 | 0.0118 | PASS |
 | 3DGS-INRIA-ply | 61,869,378 / 61,869,378 | 0.000000 | — | PASS (bit-identical) |
 | 3DGS-INRIA-nosh-ply | 14,681,969 / 14,681,969 | 0.000000 | — | PASS (bit-identical) |
 
 At 202² the same six non-PlayCanvas profiles pass as well; `SOG-PlayCanvas` needs the full 65536-entry
 codebook texture and therefore fails identically on both devices below 65536 primitives (see *Known
-gaps*). The one `>budget` cpu-vs-mps number in the whole matrix (`SOG-web-sh-split`'s `f_dc`, 0.1475)
-reproduces **exactly** when the same command is run twice on the CPU: that profile writes `f_dc` as a
-3-pixel-wide AVIF with `chroma: 420`, so 4:2:0 chroma subsampling turns PLAS's unseeded reordering into
-a different loss. Device independent. Container sizes vary by a few 0.1% between runs for the same
+gaps*). The one `>budget` cpu-vs-mps number in the whole matrix (`SOG-web-sh-split`'s `f_dc`) is the only
+place where the devices are not numerically identical, and it was resolved by a direct control rather
+than a threshold: the encoder hands the AVIF writer a quantised `f_dc` image whose **value multiset is
+identical on both devices** (max abs sorted delta 0, all three channels — only the arrangement differs,
+because PLAS is unseeded). That profile writes `f_dc` as a 3-pixel-wide AVIF with `chroma: 420`, and the
+lossy 4:2:0 reconstruction is arrangement-dependent, so the decoded error varies with PLAS's shuffle:
+0.0428-0.1712 between four CPU runs of the same command, 0.1284-0.2996 between those runs and MPS. The
+device computes the same values; the codec does not. Container sizes vary by a few 0.1% between runs for the same
 reason (PLAS is unseeded upstream), which is why bytes are quoted per run and value comparisons are
 order-independent.
 
