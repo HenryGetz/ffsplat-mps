@@ -69,7 +69,7 @@ This branch (`mps-support`, branched from upstream `3fb6444`) makes ffsplat run 
 through PyTorch's MPS backend, and it is the content of this repository's `main`. It was developed and
 verified on an **M1 Max MacBook Pro — 10 CPU cores, 32 GiB unified memory, macOS 27.0.0, arm64**,
 Python 3.13.12, torch 2.14.1. Every number below was measured on that machine; units are stated.
-Numbers labelled *baseline* were measured before the optimisation work that followed; everything else
+Numbers labelled _baseline_ were measured before the optimisation work that followed; everything else
 supersedes them. The full measurement record, the evidence images and a vendored/offline variant live
 on the [`apple-silicon` branch](https://github.com/HenryGetz/ffsplat-mps/tree/apple-silicon).
 
@@ -119,20 +119,20 @@ What changed for this:
 ### Device policy: what runs where, and why
 
 MPS is selected automatically (`resolve_device()`), and every stage that has a GPU implementation runs
-there. The stages that are on the CPU are CPU *because there is no GPU implementation in this stack*,
+there. The stages that are on the CPU are CPU _because there is no GPU implementation in this stack_,
 not by accident:
 
-| stage | device | measured basis |
-|---|---|---|
-| PLY read/decode, `container_meta.yaml` + PLY write | **CPU** | file/parse work (numpy `fromfile` + tensor assembly); no GPU equivalent. The 630 MB full-size PLY parses in **0.46 s** (in-process: `decode_gaussians` 0.44 s + one host-to-device copy 0.07 s; measured with `perf_counter` around `decode_gaussians(..., '3DGS-INRIA.ply')`), so this stage is 0.1% of the encode |
-| remap / quantise / byte-split / reindex / flatten (the SOG codec's torch ops) | **GPU** | native MPS torch kernels; 0.13 s of the full-size encode |
-| PLAS spatial sort | **GPU** | **1.8x faster on MPS at 512², 2.2x at 1594²** on the template's real 6-channel input (30.4 s vs 55.7 s; 278.7 s vs 621.6 s). The CPU retry in `PLAS._sort_with_fallback` only fires if MPS raises, and never has |
-| k-means codebook, `euclidean` (SOG-web/-png) | **GPU** | `torch.cdist`; 22.3 s vs 66.4 s on CPU for the real codebook input. GPU utilisation **99.7%** |
-| k-means codebook, `manhattan` (SOG-PlayCanvas) | **GPU** | 48.0 s vs 38.2 s on CPU per assignment pass — the one stage where the CPU is faster (see *Where MPS is not optimized*) |
-| image encode (AVIF / PNG / WEBP) | **CPU** | `cv2.imwrite` / Pillow / pillow-heif are host code and there is no GPU codec in this stack; GPU utilisation during these windows is 26.7% (i.e. idle). 4.8 s of the full-size encode |
-| rasterisation (`view`, `live`, `eval`) | **GPU** | mpsplat's Metal kernels; `tests/test_metal_path.py` fails if a call would take the torch fallback |
-| eval metrics (PSNR/SSIM/LPIPS) | **GPU** | `torchmetrics` on MPS, no CPU fallback needed |
-| COLMAP undistort/remap (eval loader) | **CPU** | `cv2.initUndistortRectifyMap` + `cv2.remap`; measured on a real 1957x1091 truck image: **3.2 ms + 1.6 ms = 4.8 ms per image** (32 eval images = 0.15 s) |
+| stage                                                                         | device  | measured basis                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PLY read/decode, `container_meta.yaml` + PLY write                            | **CPU** | file/parse work (numpy `fromfile` + tensor assembly); no GPU equivalent. The 630 MB full-size PLY parses in **0.46 s** (in-process: `decode_gaussians` 0.44 s + one host-to-device copy 0.07 s; measured with `perf_counter` around `decode_gaussians(..., '3DGS-INRIA.ply')`), so this stage is 0.1% of the encode |
+| remap / quantise / byte-split / reindex / flatten (the SOG codec's torch ops) | **GPU** | native MPS torch kernels; 0.13 s of the full-size encode                                                                                                                                                                                                                                                            |
+| PLAS spatial sort                                                             | **GPU** | **1.8x faster on MPS at 512², 2.2x at 1594²** on the template's real 6-channel input (30.4 s vs 55.7 s; 278.7 s vs 621.6 s). The CPU retry in `PLAS._sort_with_fallback` only fires if MPS raises, and never has                                                                                                    |
+| k-means codebook, `euclidean` (SOG-web/-png)                                  | **GPU** | `torch.cdist`; 22.3 s vs 66.4 s on CPU for the real codebook input. GPU utilisation **99.7%**                                                                                                                                                                                                                       |
+| k-means codebook, `manhattan` (SOG-PlayCanvas)                                | **GPU** | 48.0 s vs 38.2 s on CPU per assignment pass — the one stage where the CPU is faster (see _Where MPS is not optimized_)                                                                                                                                                                                              |
+| image encode (AVIF / PNG / WEBP)                                              | **CPU** | `cv2.imwrite` / Pillow / pillow-heif are host code and there is no GPU codec in this stack; GPU utilisation during these windows is 26.7% (i.e. idle). 4.8 s of the full-size encode                                                                                                                                |
+| rasterisation (`view`, `live`, `eval`)                                        | **GPU** | mpsplat's Metal kernels; `tests/test_metal_path.py` fails if a call would take the torch fallback                                                                                                                                                                                                                   |
+| eval metrics (PSNR/SSIM/LPIPS)                                                | **GPU** | `torchmetrics` on MPS, no CPU fallback needed                                                                                                                                                                                                                                                                       |
+| COLMAP undistort/remap (eval loader)                                          | **CPU** | `cv2.initUndistortRectifyMap` + `cv2.remap`; measured on a real 1957x1091 truck image: **3.2 ms + 1.6 ms = 4.8 ms per image** (32 eval images = 0.15 s)                                                                                                                                                             |
 
 FFmpeg/`avifenc` subprocesses, `torch.mps._host_alias_storage`, `tile_size != 16` and
 `rasterize_mode="antialiased"` are deliberately **not** used: the first two do not exist here, the last
@@ -140,20 +140,20 @@ two silently drop rendering onto the torch fallback.
 
 ### What is verified to work
 
-| command / profile | cpu | mps |
-|---|---|---|
-| `convert --output-format SOG-web` | works | works |
-| `--output-format SOG-web-png` | works | works |
-| `--output-format SOG-web-nosh` | works | works |
-| `--output-format SOG-web-sh-split` | works | works |
-| `--output-format SOG-PlayCanvas` | works (scenes >= 65536 primitives) | works (same) |
-| `--output-format 3DGS-INRIA-ply` / `-nosh-ply` | works | works |
-| decode a SOG container -> PLY (`--input-format smurfx`, the container token; the `SOG-*` names are *profiles*, not input formats - `SOG-web` raises `ValueError: Unsupported input format`) | works | works |
-| round-trip `PLY -> SOG-web -> PLY`, 2.54M primitives | works, all budgets | works, all budgets |
-| `ffsplat view` / `ffsplat live` (browser, `localhost:8080`) | n/a | works |
-| `ffsplat eval` (real Tanks&Temples COLMAP set, 32 images) | n/a | works, SSIM + LPIPS on MPS |
-| `pytest --doctest-modules` | 23 passed | 23 passed |
-| `mypy`, `deptry`, `ruff check`, `ruff format --check` | no new findings (mypy/deptry clean; the 5 ruff check findings and 3 `ruff format --check` complaints are pre-existing upstream lines, verified unchanged against `3fb6444`) | same |
+| command / profile                                                                                                                                                                           | cpu                                                                                                                                                                         | mps                        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `convert --output-format SOG-web`                                                                                                                                                           | works                                                                                                                                                                       | works                      |
+| `--output-format SOG-web-png`                                                                                                                                                               | works                                                                                                                                                                       | works                      |
+| `--output-format SOG-web-nosh`                                                                                                                                                              | works                                                                                                                                                                       | works                      |
+| `--output-format SOG-web-sh-split`                                                                                                                                                          | works                                                                                                                                                                       | works                      |
+| `--output-format SOG-PlayCanvas`                                                                                                                                                            | works (scenes >= 65536 primitives)                                                                                                                                          | works (same)               |
+| `--output-format 3DGS-INRIA-ply` / `-nosh-ply`                                                                                                                                              | works                                                                                                                                                                       | works                      |
+| decode a SOG container -> PLY (`--input-format smurfx`, the container token; the `SOG-*` names are _profiles_, not input formats - `SOG-web` raises `ValueError: Unsupported input format`) | works                                                                                                                                                                       | works                      |
+| round-trip `PLY -> SOG-web -> PLY`, 2.54M primitives                                                                                                                                        | works, all budgets                                                                                                                                                          | works, all budgets         |
+| `ffsplat view` / `ffsplat live` (browser, `localhost:8080`)                                                                                                                                 | n/a                                                                                                                                                                         | works                      |
+| `ffsplat eval` (real Tanks&Temples COLMAP set, 32 images)                                                                                                                                   | n/a                                                                                                                                                                         | works, SSIM + LPIPS on MPS |
+| `pytest --doctest-modules`                                                                                                                                                                  | 23 passed                                                                                                                                                                   | 23 passed                  |
+| `mypy`, `deptry`, `ruff check`, `ruff format --check`                                                                                                                                       | no new findings (mypy/deptry clean; the 5 ruff check findings and 3 `ruff format --check` complaints are pre-existing upstream lines, verified unchanged against `3fb6444`) | same                       |
 
 ### Parity vs CPU
 
@@ -167,22 +167,22 @@ mean/median error statistics agree between devices:
 All rows below are the **512² (262,144-primitive) run**; its verbatim report is on the
 `apple-silicon` branch (A1.5, `matrix_report.py mid512`), and delta and budget come from the same run.
 
-| profile | container bytes cpu / mps | cpu-vs-mps worst property delta | budget | verdict |
-|---|---|---|---|---|
-| SOG-web | 4,508,343 / 4,510,184 | `f_rest` 0.036184 (mean/range; everything else 0.000000) | 0.05 | PASS |
-| SOG-web-png | 4,845,133 / 4,847,738 | `f_rest` 0.036184 (mean/range; everything else 0.000000) | 0.05 | PASS |
-| SOG-web-nosh | 2,912,255 / 2,911,156 | `f_dc` 0.085588 | 0.120918 | PASS |
-| SOG-web-sh-split | 5,877,576 / 5,878,134 | `f_dc` 0.213970 (0.042794-0.171176 for the same measurement between four CPU runs; everything else 0.000000) | 0.120918 | PASS by control: the encoder's quantised `f_dc` image is multiset-identical across devices (max abs sorted delta 0); the decoded difference comes only from this profile's lossy `chroma: 420` 3-pixel-wide AVIF — see A1.5a on `apple-silicon` |
-| SOG-PlayCanvas | 5,246,358 / 5,187,036 | `rot` 0.000015 | 0.011764 | PASS |
-| 3DGS-INRIA-ply | 61,869,378 / 61,869,378 | 0.000000 | — | PASS (bit-identical) |
-| 3DGS-INRIA-nosh-ply | 14,681,969 / 14,681,969 | 0.000000 | — | PASS (bit-identical) |
+| profile             | container bytes cpu / mps | cpu-vs-mps worst property delta                                                                              | budget   | verdict                                                                                                                                                                                                                                         |
+| ------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SOG-web             | 4,508,343 / 4,510,184     | `f_rest` 0.036184 (mean/range; everything else 0.000000)                                                     | 0.05     | PASS                                                                                                                                                                                                                                            |
+| SOG-web-png         | 4,845,133 / 4,847,738     | `f_rest` 0.036184 (mean/range; everything else 0.000000)                                                     | 0.05     | PASS                                                                                                                                                                                                                                            |
+| SOG-web-nosh        | 2,912,255 / 2,911,156     | `f_dc` 0.085588                                                                                              | 0.120918 | PASS                                                                                                                                                                                                                                            |
+| SOG-web-sh-split    | 5,877,576 / 5,878,134     | `f_dc` 0.213970 (0.042794-0.171176 for the same measurement between four CPU runs; everything else 0.000000) | 0.120918 | PASS by control: the encoder's quantised `f_dc` image is multiset-identical across devices (max abs sorted delta 0); the decoded difference comes only from this profile's lossy `chroma: 420` 3-pixel-wide AVIF — see A1.5a on `apple-silicon` |
+| SOG-PlayCanvas      | 5,246,358 / 5,187,036     | `rot` 0.000015                                                                                               | 0.011764 | PASS                                                                                                                                                                                                                                            |
+| 3DGS-INRIA-ply      | 61,869,378 / 61,869,378   | 0.000000                                                                                                     | —        | PASS (bit-identical)                                                                                                                                                                                                                            |
+| 3DGS-INRIA-nosh-ply | 14,681,969 / 14,681,969   | 0.000000                                                                                                     | —        | PASS (bit-identical)                                                                                                                                                                                                                            |
 
 At 202² the same six non-PlayCanvas profiles pass as well, with the same caveat as the 512² sh-split
 row: `SOG-web-nosh`'s and `SOG-web-sh-split`'s `f_dc` sit within the codec's own run-to-run noise there
 too (the audit measured 0.099582 and 0.099844 against 0.095100 / 0.094724 budgets, i.e. the harness row
 reads FAIL on a single run and passes once a second same-device run supplies the noise floor).
 `SOG-PlayCanvas` needs the full 65536-entry codebook texture and therefore fails identically on both
-devices below 65536 primitives (see *Known gaps*). The one `>budget` cpu-vs-mps number in the whole matrix (`SOG-web-sh-split`'s `f_dc`) is the only
+devices below 65536 primitives (see _Known gaps_). The one `>budget` cpu-vs-mps number in the whole matrix (`SOG-web-sh-split`'s `f_dc`) is the only
 place where the devices are not numerically identical, and it was resolved by a direct control rather
 than a threshold: the encoder hands the AVIF writer a quantised `f_dc` image whose **value multiset is
 identical on both devices** (max abs sorted delta 0, all three channels — only the arrangement differs,
@@ -206,10 +206,10 @@ Rasterising the real pre-trained INRIA **truck** model (2,541,226 Gaussians, `sh
 device** - no host-to-device copy and no preprocessing is inside the measured window (that is what
 `cli/view.py`'s `render_fn` does per frame once a scene is loaded):
 
-| path | cold (Metal JIT / first call) | warm |
-|---|---|---|
-| **Metal kernels** (what `view`, `live` and `eval` use) | **0.09 s** | **0.033 s** (median of 5; 0.045 s in a second, equally idle run) |
-| pure-torch fallback (only reached if `backgrounds=`/`masks=` is passed or SH degree > 4) | 5.13 s | 1.69 s |
+| path                                                                                     | cold (Metal JIT / first call) | warm                                                             |
+| ---------------------------------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------- |
+| **Metal kernels** (what `view`, `live` and `eval` use)                                   | **0.09 s**                    | **0.033 s** (median of 5; 0.045 s in a second, equally idle run) |
+| pure-torch fallback (only reached if `backgrounds=`/`masks=` is passed or SH degree > 4) | 5.13 s                        | 1.69 s                                                           |
 
 Re-measured through the shipped dependency (mpsplat installed from the pinned revision rather than a
 vendored copy), same scene, same size, same call, tensors resident: cold (first call ever, Metal JIT)
@@ -220,22 +220,22 @@ and a CPU reference render on the same GPU.
 
 Rendering the **40,804-primitive** tiny scene (the same truck subsampled to 202², decoded from this
 branch's own SOG-web container) through `cli/view.py`'s `render_fn` on MPS at 978x545: warm
-**5.3 ms** (median of 5). That is a *different* quantity from the table above - `render_fn` end to
+**5.3 ms** (median of 5). That is a _different_ quantity from the table above - `render_fn` end to
 end, including its numpy output conversion, on a scene 62x smaller.
 
 > Historical note: the numbers recorded in earlier revisions of this file (5.73 s cold / 1.72 s warm)
-> were measured through the *fallback* path, because the gate script that produced them passed
+> were measured through the _fallback_ path, because the gate script that produced them passed
 > `backgrounds=`. They are kept here as the fallback's timing, and relabelled.
 
 PLAS spatial sorting. The template's real input is a 6-channel grid (means -> signed-log -> 16-bit
 quantise -> split bytes -> standardize), and PLAS's runtime is data-dependent, so this was re-measured
 on the real tensor captured from the encoder:
 
-| grid (real 6-channel input) | cells | `--device cpu` | `--device mps` |
-|---|---|---|---|
-| 512² | 262,144 | 55.7 s (median of 3) | **30.4 s** (median of 3) |
-| 1594² (the real scene) | 2,540,836 | 621.6 s (median of 2) | **278.7 s** (median of 2) |
-| *baseline: 2-channel random grid, pre-measurement* | 262,144 | *21.6 s* | *64.3 s* |
+| grid (real 6-channel input)                        | cells     | `--device cpu`        | `--device mps`            |
+| -------------------------------------------------- | --------- | --------------------- | ------------------------- |
+| 512²                                               | 262,144   | 55.7 s (median of 3)  | **30.4 s** (median of 3)  |
+| 1594² (the real scene)                             | 2,540,836 | 621.6 s (median of 2) | **278.7 s** (median of 2) |
+| _baseline: 2-channel random grid, pre-measurement_ | 262,144   | _21.6 s_              | _64.3 s_                  |
 
 The baseline row is kept only to show why it was misleading: a 2-channel random grid is not what the
 SOG templates feed PLAS, and it inverted the sign of the result.
@@ -243,37 +243,37 @@ SOG templates feed PLAS, and it inverted the sign of the result.
 k-means codebook (the SOG-web input from a 512² real-truck scene, N=262,144, K=65,536, D=45, ten Lloyd
 iterations plus the full-data assignment):
 
-| | before | after |
-|---|---|---|
+|                | before  | after      |
+| -------------- | ------- | ---------- |
 | `--device cpu` | 105.8 s | **66.4 s** |
-| `--device mps` | 68.2 s | **22.3 s** |
+| `--device mps` | 68.2 s  | **22.3 s** |
 
 Full-size truck round-trip, 2,541,226 -> 2,540,836 Gaussians (the SOG-web template prunes to
 `floor(sqrt(N))²` for its square grid); 630,225,580 B input PLY -> ~33 MB SOG container (~19x smaller):
 
-| device and code state | encode (PLY -> SOG-web) | decode (SOG-web -> PLY) |
-|---|---|---|
-| `--device mps`, **pre-optimisation baseline** (freshly cloned, idle) | 425.8 s | 6.1 s |
-| `--device cpu`, **pre-optimisation baseline** | 863.6 s | 6.3 s |
-| `--device mps`, **after the k-means change** (this branch's state), idle | **324.8 s** - container 32,973,468 B | 5.8 s |
-| `--device cpu`, **after the k-means change** (this branch's state), idle | **683.65 s** - container 32995454 B | 6.3 s |
+| device and code state                                                    | encode (PLY -> SOG-web)              | decode (SOG-web -> PLY) |
+| ------------------------------------------------------------------------ | ------------------------------------ | ----------------------- |
+| `--device mps`, **pre-optimisation baseline** (freshly cloned, idle)     | 425.8 s                              | 6.1 s                   |
+| `--device cpu`, **pre-optimisation baseline**                            | 863.6 s                              | 6.3 s                   |
+| `--device mps`, **after the k-means change** (this branch's state), idle | **324.8 s** - container 32,973,468 B | 5.8 s                   |
+| `--device cpu`, **after the k-means change** (this branch's state), idle | **683.65 s** - container 32995454 B  | 6.3 s                   |
 
 Like-for-like (both after the k-means change), MPS is **~2.1x** faster than the CPU: 683.65 s versus
 324.8 s. Against its own pre-optimisation baseline the MPS run is **1.31x** faster (425.8 -> 324.8 s),
-and that gain is the k-means change - which also made the *CPU* path 1.59x faster, which is why the old
+and that gain is the k-means change - which also made the _CPU_ path 1.59x faster, which is why the old
 863.6 s CPU number must not be paired against the new MPS number (that pairing would overstate the
 ratio as 2.66x).
 
 Where the 339.4 s of **instrumented** encode time goes (same workload as the 324.8 s CLI run; the
 instrumentation adds one device synchronisation per transformation, which is the 14.6 s difference):
 
-| stage | seconds | share | GPU utilisation (full-size run) |
-|---|---|---|---|
-| PLAS spatial sort | 291.5 | 85.9% | 94.9% |
-| k-means fit + full-data assignment | 42.9 | 12.6% | 99.8% |
-| image encode (9 files, AVIF) | 4.8 | 1.4% | 20.1% (CPU-bound stage) |
-| quantise / byte-split / reindex / reshaping | 0.13 | 0.04% | - |
-| **total, instrumented** | **339.4** | | 94.4% mean for the run |
+| stage                                       | seconds   | share | GPU utilisation (full-size run) |
+| ------------------------------------------- | --------- | ----- | ------------------------------- |
+| PLAS spatial sort                           | 291.5     | 85.9% | 94.9%                           |
+| k-means fit + full-data assignment          | 42.9      | 12.6% | 99.8%                           |
+| image encode (9 files, AVIF)                | 4.8       | 1.4%  | 20.1% (CPU-bound stage)         |
+| quantise / byte-split / reindex / reshaping | 0.13      | 0.04% | -                               |
+| **total, instrumented**                     | **339.4** |       | 94.4% mean for the run          |
 
 (The utilisation column is the independent audit's full-size run, which reproduced this table within
 0.5%; my own instrumented run recorded 94.2% for the whole encode. The 512² per-stage utilisation
@@ -371,7 +371,6 @@ builds viser's browser client (~45 s, once).
   Metal-path test cover the change.
 - viser's initial camera is not set by ffsplat, so a freshly opened viewer is framed arbitrarily — that is
   upstream behaviour, not MPS-specific.
-
 
 ## 3DGS Container Format
 
