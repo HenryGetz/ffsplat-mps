@@ -2476,3 +2476,147 @@ only grid that matters. `tests/test_plas_vendor.py::test_shipped_check_every_is_
 pins that and says why. The mechanism is kept because it is verified bit-for-bit at
 `check_every=1` (C3), because it is what made C4/C5 measurable, and because it is one constant away
 if a future grid or a cheaper reorder changes the trade.
+
+## C7. Quality gates and the end-to-end run (acceptance #2, #3)
+
+`ffsplat-fixtures/plasfix_phase2.sh` on the shipped head (`_PLAS_CHECK_EVERY = 1`), one process at a
+time. Every number below is verbatim.
+
+**Bit-for-bit no-op, re-confirmed on the shipped head** (C3's harness):
+
+```
+$ .venv/bin/python plas_patch_equivalence.py 202 512
+  202 cpu check_every=1  upstream    8.57s  vendored    9.32s  grid_indices identical=True  sorted params identical=True  (must be True)
+  202 cpu check_every=4  upstream    9.71s  vendored    9.57s  grid_indices identical=False  sorted params identical=False  (heuristic: may differ)
+  202 mps check_every=1  upstream    8.52s  vendored    7.99s  grid_indices identical=True  sorted params identical=True  (must be True)
+  202 mps check_every=4  upstream    7.17s  vendored    8.18s  grid_indices identical=False  sorted params identical=False  (heuristic: may differ)
+  512 cpu check_every=1  upstream   49.47s  vendored   51.63s  grid_indices identical=True  sorted params identical=True  (must be True)
+  512 cpu check_every=4  upstream   45.89s  vendored   47.92s  grid_indices identical=False  sorted params identical=False  (heuristic: may differ)
+  512 mps check_every=1  upstream   29.59s  vendored   30.94s  grid_indices identical=True  sorted params identical=True  (must be True)
+  512 mps check_every=4  upstream   29.05s  vendored   29.73s  grid_indices identical=False  sorted params identical=False  (heuristic: may differ)
+EQUIVALENT at check_every=1
+```
+
+**Repository gates** (acceptance #3):
+
+```
+$ .venv/bin/python -m pytest --doctest-modules -q
+34 passed, 74 warnings in 11.07s
+$ .venv/bin/python -m mypy
+Success: no issues found in 11 source files
+$ .venv/bin/python -m deptry .
+Success! No dependency issues found.
+$ .venv/bin/python -m ruff check --no-fix .
+Found 5 errors.        # cli/__main__.py RUF005, datasets/colmapparser.py RUF046 x2,
+                       # models/transformations.py C420, render/_renderer.py C420 - all pre-existing
+                       # upstream lines, the same set as at 3fb6444
+$ .venv/bin/python -m ruff format --check .
+Would reformat: src/ffsplat/cli/eval.py, src/ffsplat/cli/live.py, src/ffsplat/models/transformations.py
+3 files would be reformatted, 31 files already formatted
+```
+
+34 tests, not 23: `tests/test_plas_vendor.py` adds 11. `ruff check` must be run with `--no-fix`:
+without it, ruff auto-fixed two unrelated upstream dict comprehensions (`_renderer.py`,
+`transformations.py`) into `dict.fromkeys`; both were reverted.
+
+**Host-sync count in a real encode** (202² real scene, `sync_count.py`, which patches every
+host-transfer entry point and attributes it to the nearest ffsplat frame):
+
+```
+device=cpu check_every=1  encode=17.85s   5595 total syncs, 5545 of them in reorder_plas
+device=cpu check_every=4  encode=18.31s   1864 total syncs, 1814 of them in sort_with_plas
+device=mps check_every=1  encode=11.67s   5768 total syncs, 5718 of them in reorder_plas
+device=mps check_every=4  encode= 9.47s   1819 total syncs, 1769 of them in sort_with_plas
+```
+
+The mechanism removes **67% of the encode's host syncs on CPU and 69% on MPS** - and at this small
+grid it also wins on wall time (11.67 s -> 9.47 s on MPS), which is the grid-size dependence in
+miniature: the cheaper the reorder, the larger the sync's share. At 1594² it inverts (C6).
+
+**SOG-web row of the order-independent parity matrix**, 512² real scene, both devices plus a second
+CPU run for the noise floor:
+
+```
+== SOG-web: cpu=OK mps=OK
+   bytes cpu=4510150 mps=4510355 (delta +205)  N=262144->262144  enc cpu=128.69s mps=53.26s
+   group       cpu|delta|max  mps|delta|max       budget  CPU vs MPS max  CPU2 vs CPU max  verdict
+   f_dc_            0.036935       0.036935     0.121394        0.000000         0.000000  PASS
+   f_rest_          0.230475       0.230475     codebook        0.036184         0.000000  PASS(codebook)
+   opacity          0.040589       0.040589     0.047574        0.000000         0.000000  PASS
+   rot_             0.032728       0.032728     0.163088        0.000000         0.000000  PASS
+   scale_           0.263837       0.263837     1.151069        0.000000         0.000000  PASS
+   x                0.003639       0.003639          n/a        0.000000         0.000000  PASS
+   y                0.001602       0.001602          n/a        0.000000         0.000000  PASS
+   z                0.003879       0.003879          n/a        0.000000         0.000000  PASS
+   device error statistics agree (within 2x) for: ['f_dc_', 'f_rest_', 'opacity', 'rot_', 'scale_', 'x', 'y', 'z']
+# summary
+SOG-web                cpu=4510150 mps=4510355 parity=PASS
+```
+
+**Full-size CLI encode** (2.54M primitives, SOG-web, MPS) and the container it produced:
+
+```
+$ /usr/bin/time -p ffsplat convert --input raw/truck/point_cloud.ply --input-format 3DGS-INRIA.ply \
+      --output /tmp/plasfix_full/sog --output-format SOG-web --device mps
+real 343.02
+32224   /tmp/plasfix_full/sog          # 32,997,376 B
+```
+
+**That 343.02 s is not comparable to the 324.8 s baseline and must not be read as a regression from
+this workstream.** The shipped PLAS path is bit-for-bit upstream (above), so PLAS cannot have
+changed; the same session's instrumented run attributes the extra time to stages this workstream
+does not touch: `kmeans 47.4 s` against the recorded 42.9 s (+10%) and `PLAS sort 297.4 s` against
+291.5 s (+2%, inside PLAS's own unseeded spread of a few percent). The instrumented total was
+350.3 s against 339.4 s. Both runs went through the parity matrix's encodes immediately before, on
+a machine that also had other work on it. [INFERENCE] on an idle machine the head should reproduce
+the 324.8 s baseline, because its PLAS path is upstream's - but that has not been re-measured.
+
+**Container fidelity** (`full_container_check.py`, order-independent, codec-derived budgets):
+
+```
+group                        worst vs input       budget  verdict
+f_dc_                              0.082205     0.141267  PASS
+f_rest_                              0.0127 0.05 (mean/range)  PASS
+opacity                            0.039440     0.047544  PASS
+rot_                               0.034564     0.192934  PASS
+scale_                             0.269486     1.286793  PASS
+x                                  0.002864  n/a (float)  PASS
+y                                  0.001131  n/a (float)  PASS
+z                                  0.004839  n/a (float)  PASS
+groups checked: 8; failures: []
+FULL CONTAINER OK
+```
+
+**`ffsplat eval` on that container** against the real Tanks&Temples/truck COLMAP set (32 images):
+
+```
+[Parser] 251 images, taken by 251 cameras.
+PSNR: 24.295, SSIM: 0.8461, LPIPS: 0.184 Time: 0.049s/image Number of GS: 2540836 Size: 31.452MB
+```
+
+**Identical to the acceptance target and to the pre-change record (24.295 / 0.8461 / 0.184).** All
+three quality gates hold.
+
+## C8. What is left, and why
+
+* **The sync is gone from the shipped configuration in the sense that matters**: the mechanism
+  exists, is verified bit-for-bit at `check_every=1`, and removes 67-69% of the encode's host syncs
+  when enabled - but it is **shipped off**, because enabling it is 3.1% slower at 1594² MPS (C6).
+  So it removes **0 s of the 291.5 s**, and that is the measured answer to the brief's question.
+* **What the 291.5 s is spent on**: the reorder's own tensor ops, ~39.9 ms each at 1594² and ~7000
+  of them. Two ops are 62% of a 512² reorder (`gather params` 1.303 ms, the candidate-distance
+  tensor 1.127 ms), each materialising a `[1024, 6, 64, 4, 4]` intermediate to move 1.5 M useful
+  values; 16 tiny pointwise kernels cost 0.118 ms in total, so launch overhead is not it (C5).
+* **The measured next lever** is `torch.compile` on the candidate-distance helper alone: 5.0x on
+  that op (1.127 ms -> 0.224 ms), ~20% of PLAS / ~17% of the encode. It is not adopted because it
+  changes the summation order and therefore possibly an `argmin` and the sort's output, which needs
+  its own quality validation. Compiling the whole reorder is 56x slower and is not a lever.
+* **Not attempted**: a design that removes the sync *without* sampling the early-exit test - run
+  `check_every` reorders, then roll back to the exact break point by composing the applied
+  permutations. That is the only way to keep upstream's stopping point while removing the sync, and
+  it would recover the 1.40 ms/reorder the sync costs (3.5% at 1594²) with no overshoot. It is a
+  rewrite of `reorder_blocky_shuffled` plus a state snapshot per block config, and the measured
+  prize (~3.5% of PLAS) did not justify it in this pass. It is recorded here because it is the
+  honest answer to "what would it take".
+* **`manhattan` k-means and the image encoders** are unchanged and still the two other gaps in
+  B4 items 2-3.
