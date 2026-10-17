@@ -99,3 +99,23 @@ def test_3dgs_inria_nosh_ply_writes_only_the_dc_coefficients(tmp_path: Path) -> 
     decoded = decode_gaussians(out / "point_cloud.ply", "3DGS-INRIA-nosh.ply", verbose=False)
     assert decoded.num_gaussians == N
     assert decoded.sh.data.shape == (N, 1, 3)
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected_files"),
+    [
+        ("SOG-web-png", ["f_rest_centroids.png"]),
+        ("SOG-web-sh-split", ["f_rest_0.avif", "f_rest_14.avif"]),
+    ],
+)
+def test_sog_web_variants_encode_and_decode(tmp_path: Path, profile: str, expected_files: list[str]) -> None:
+    """The png/avif-SH variants share the SOG-web codec but write different image sets."""
+    out = tmp_path / profile
+    encode_gaussians(_synthetic_scene(), out, profile, False)
+    names = {p.name for p in out.iterdir()}
+    assert "container_meta.yaml" in names
+    assert set(expected_files) <= names, f"{profile} is missing {set(expected_files) - names}"
+    decoded = decode_gaussians(out, "smurfx", verbose=False)
+    assert decoded.num_gaussians == 961
+    assert decoded.sh.data.shape[1] == 16
+    assert decoded.means.data.dtype == torch.float32
