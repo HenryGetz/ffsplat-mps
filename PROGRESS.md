@@ -1518,3 +1518,288 @@ the `.item()` is a graph break and MPS Inductor never fuses matmul
 
 At the full grid PLAS is therefore ~279 s of a ~426 s full-size MPS encode (**~65%**), and the honest
 statement is: *that stage is at its ceiling for this stack*.
+
+### B2.2 k-means (euclidean): `torch.cdist` — **adopted, 3.07x faster on MPS**
+
+The euclidean path expanded `||x||^2 - 2 x.c + ||c||^2` by hand: a matmul plus three elementwise
+passes over a fresh `[C, K]` buffer, and it recomputed the centroid norms (`(c*c).sum(1)`) **inside
+the per-chunk loop**. Six formulations were measured on the real shape (N=262144 rows, K=65536, D=45,
+one full assignment pass, labels compared against the incumbent):
+
+```
+$ .venv/bin/python kmeans_variants.py 262144 65536 45 1
+               variant device   chunk        s   labels agree with v0
+            v0 current    cpu     512     7.99     262144/262144
+         v1 hoisted c2    cpu     512     7.49     262144/262144
+           v2 in-place    cpu     512     6.64     262144/262144
+              v3 addmm    cpu     512     8.16     262144/262144
+  v4 in-place 4x chunk    cpu     512     8.86     262144/262144
+              v5 cdist    cpu     512     6.66     262144/262144
+            v0 current    mps     512     5.44     262144/262144
+         v1 hoisted c2    mps     512     5.37     262144/262144
+           v2 in-place    mps     512     5.47     262144/262144
+              v3 addmm    mps     512     3.46     262144/262144
+  v4 in-place 4x chunk    mps     512     5.90     262144/262144
+              v5 cdist    mps     512     2.07     262144/262144
+```
+
+`torch.cdist(p=2)` wins outright on MPS (2.07 s vs 5.44 s) and matches the best CPU variant, and every
+formulation reproduces the incumbent's labels exactly (262144/262144). Chunk tuning on top of cdist is
+a wash (MPS x1 1.95 / x2 1.93 / x4 2.04 s), so the chunk stays `_chunk_rows(K)`.
+
+Adopted in `src/ffsplat/models/clustering.py`. End-to-end effect on the real k-means input, same scene
+and shape as the encode uses (`kmeans_bench.py`, the whole 10-iteration fit + full-data assignment):
+
+| | before | after | speedup |
+|---|---|---|---|
+| `--device cpu` | 105.8 s (median of 3, stage profiler) | **66.4 s** (median of 2: 65.99 / 66.88) | 1.59x |
+| `--device mps` | 68.2 s (median of 3, stage profiler) | **22.3 s** (median of 2: 22.01 / 22.50) | **3.07x** |
+
+Codebook quality is unchanged: 64047 (cpu) / 64045 (mps) non-empty clusters of 65536, against
+64046/64045 before.
+
+`manhattan` (only the SOG-PlayCanvas profile uses it) was measured too, and **the blocked loop is kept
+on MPS deliberately**:
+
+```
+ manhattan    40804   40804    cpu             cdist chunk x1     3.38  labels==cdist-x1 40804/40804
+ manhattan    40804   40804    cpu             cdist chunk x2     3.30  labels==cdist-x1 40804/40804
+ manhattan    40804   40804    cpu             cdist chunk x4     3.38  labels==cdist-x1 40804/40804
+ manhattan    40804   40804    cpu        blocked abs().sum()    27.97  labels==cdist-x1 40804/40804
+ manhattan    40804   40804    mps             cdist chunk x1     4.21  labels==cdist-x1 40804/40804
+ manhattan    40804   40804    mps             cdist chunk x2     0.00  labels==cdist-x1 4/40804
+ manhattan    40804   40804    mps             cdist chunk x4  RAISED RuntimeError: Invalid buffer size: 22.50 GiB
+ manhattan    40804   40804    mps        blocked abs().sum()     8.57  labels==cdist-x1 40804/40804
+```
+
+`torch.cdist(p=1)` on MPS allocates an internal `[chunk, K, D]` buffer: at 1644 rows it returns in
+0.00 s with **silently wrong labels** (4/40804 correct) and at 3287 rows it raises
+`Invalid buffer size: 22.50 GiB`. A codec that silently mislabels 25 728 primitives is worse than one
+that is 2x slower, so MPS keeps the deterministic blocked accumulation (unchanged from before, bounded
+by `_MAX_SCORE_ELEMS`), while CPU/CUDA get `cdist(p=1)` (8.3x faster, labels identical). Both paths are
+in `_distances`/`_manhattan_blocked` with the measurement in the docstring.
+
+### B2.3 `eval` + white background: **adopted** — measured equivalence, Metal path restored
+
+`cli/eval.py` passed `backgrounds=<white>`, which silently drops the call onto the pure-torch
+rasterizer. It now composites afterwards (`color + (1 - alpha) * white`, the rasterizer's own blend).
+Equivalence measured on the real truck Gaussians (3000 primitives, 244x136, MPS):
+
+```
+with backgrounds (torch path)    colors mean=0.965457 alpha mean=0.066530 shape=(1, 136, 244, 3)
+without (Metal path)             colors mean=0.031988 alpha mean=0.066530 shape=(1, 136, 244, 3)
+colors: max|delta|=1.550e-06 mean|delta|=1.076e-08 px>1e-3=0/99552
+alpha : max|delta|=1.550e-06 mean|delta|=1.633e-08
+EQUIVALENT
+```
+
+`tests/test_metal_path.py::test_eval_rasterize_splats_stays_on_the_metal_path_with_a_white_background`
+now fails if the call ever takes the torch fallback again. The eval end-to-end re-verification (metrics
+unchanged + wall clock) is in B3.
+
+### B2.4 Image / AVIF path: CPU-bound by construction, quantified
+
+`write_image` (`transformations.py:61-89`) hands the field to `cv2.imwrite` (PNG), `Pillow`+`pillow_heif`
+(AVIF) or `Pillow` (WEBP) after one `field_data.cpu().numpy()`. Measured at 512²: **1.90 s of a 100.3 s
+MPS encode (2%)**, 9 files, of which `f_rest_centroids.avif` (a 45x65536 image) is 0.85 s (45%). Each
+file costs exactly one host transfer/sync (10 per SOG-web encode). There is no GPU AVIF/PNG encoder in
+this stack and Pillow exposes no threading knob, so this stage is left on the CPU and is reported as
+such; the only lever is the container's own `chroma`/`quality` parameters, which change the output and
+are therefore a format decision, not a port optimisation.
+
+### B2.5 Host-sync audit: 98.5% of the syncs are inside upstream `plas`, none are ours in a loop
+
+`sync_count.py` patches `torch.Tensor.cpu/numpy/tolist/item/__bool__/__float__` and attributes every
+call to the nearest ffsplat frame, then runs one real SOG-web encode (202² scene):
+
+```
+device=cpu N=40804 encode=23.72s
+  count  site
+   4825  item <- core.py:418 reorder_plas
+    594  item <- core.py:401 reorder_plas
+     14  __bool__ <- transformations.py:1401 apply      (convert_to_dtype range checks, 2 per field)
+      9  cpu <- transformations.py:1123 apply           (write_image: one host copy per output image)
+      9  numpy <- transformations.py:1123 apply
+      8  tolist <- transformations.py:1519 apply_transform   (SimpleQuantize records min/max)
+      6  item <- transformations.py:1519 apply_transform     (convert_to_dtype)
+      2  __bool__ <- transformations.py:893 plas_preprocess
+      2  __bool__ <- transformations.py:1519 apply_transform
+   5469  TOTAL
+
+device=mps N=40804 encode=24.12s
+  5054 item <- core.py:418 reorder_plas
+   573 item <- core.py:401 reorder_plas
+    ...
+   5677  TOTAL
+```
+
+* **5398 of 5469 (98.5% on CPU; 5627/5677 on MPS) are inside `plas`** (`plas/core.py:401` and
+  `:418`, the `l2_dist(...).item()` + scalar branch the research brief identified). That is the
+  upstream design, in a PyPI wheel; patching it would not survive a clean clone, so it is reported.
+* **ffsplat's own code contributes 48 syncs**, and every one is O(1) per field or per output file:
+  9 host copies for the 9 images (the CPU codec needs numpy — unavoidable), 14 range checks in
+  `convert_to_dtype`, 8 quantiser min/max recordings, 6 `item()`s in the same range checks, and 4
+  tensor-truth tests in `standardize`/`minmax`. **There is no per-item sync in any loop in
+  `src/ffsplat/`.** Reducing the 14 range checks to 7 by using `torch.aminmax` would save 0.13% of
+  the syncs — not worth a code change.
+
+### B2.6 Environment knobs: none adopted
+
+* `PYTORCH_MPS_HIGH_WATERMARK_RATIO` / `LOW_WATERMARK_RATIO` cap the allocator's device memory. They
+  are a robustness knob, not a speed knob: nothing in this pipeline allocates near the watermark (the
+  largest tensors are the 1594² x 6 PLAS grid, ~61 MB, and the 134 MB k-means score chunk). Measured
+  control below (B2.7) shows a run with the ratio left at its default is indistinguishable from one
+  with it widened, i.e. there is nothing to gain.
+* `PYTORCH_MPS_FAST_MATH`: no in-wheel or in-tree evidence that it affects this stack, and the two
+  hot stages are an upstream Python-loop sort and a k-means matmul, neither of which is a shader
+  fast-math candidate. Not enabled.
+* `torch.mps.empty_cache()`: only helps fragmentation; it is a synchronising call, so calling it in a
+  loop (e.g. per k-means iteration) would cost time. Not adopted.
+* `torch.compile`: not adopted for PLAS (its `.item()` is a graph break inside the third-party wheel)
+  and not needed for k-means any more (cdist already won 3x; MPS Inductor never fuses matmul,
+  `torch/_inductor/kernel/mm_common.py:211`).
+* `tile_size` is **not** a knob: only the default 16 keeps the Metal path
+  (`vendor/mpsplat/gsplat/cuda/_wrapper.py:1104`), and `tests/test_metal_path.py` now pins that.
+
+## B3. End-to-end, full 2.54M truck scene, idle machine
+
+One idle-machine block (`ffsplat-fixtures/idle_measure_sequence.sh`), run strictly sequentially, no
+other work on the machine. Summary of the commands is verbatim; full log kept alongside.
+
+**Raster (2,541,226 Gaussians, 978x545, `sh_degree=3`, `radius_clip=3`, MPS, `cli/view.py`'s call):**
+
+```
+$ .venv/bin/python raster_timing.py .../raw/truck/point_cloud.ply 5
+cold (first call, includes the Metal JIT compile): 0.09 s
+warm: median 0.03 s  min 0.03  runs=[0.07, 0.03, 0.03, 0.03, 0.03]
+image: mean=0.490734 max=1.619059
+```
+
+**This corrects the record.** `gate_render.py` (the Stage-0 gate) passed `backgrounds=torch.ones(1,3)`,
+which routes the call onto mpsplat's pure-torch rasterizer — so its recorded "5.73 s cold / 1.72 s warm"
+is the **fallback** path, not the Metal kernels. Head-to-head on the same tensors, same camera, same
+process:
+
+```
+$ .venv/bin/python eval_render_bench.py .../raw/truck/point_cloud.ply 5
+backgrounds=<white> (what eval used to do)     median  2.018s  runs=[2.02, 2.02, 2.03, 2.0, 2.02]
+backgrounds=None + host composite (now)        median  0.045s  runs=[0.04, 0.06, 0.05, 0.05, 0.05]
+speedup: 44.84x  at 978x545
+```
+
+| raster path (full truck, 978x545, MPS) | cold | warm |
+|---|---|---|
+| **Metal kernels** (what `view`/`live` always used, and `eval` uses again) | **0.09 s** | **0.033-0.045 s** |
+| pure-torch fallback (what the Stage-0 gate measured, and what `eval` used with a white background) | 5.13 s | 1.69-2.02 s |
+
+**Full-size encode (MPS, plain CLI, idle machine):**
+
+```
+$ /usr/bin/time -p ffsplat convert --input .../raw/truck/point_cloud.ply --input-format 3DGS-INRIA.ply \
+      --output /tmp/full_after/sog --output-format SOG-web --device mps
+real 324.83
+# container: 10 files, 32973468 bytes
+```
+
+| full-size MPS encode | seconds | vs baseline |
+|---|---|---|
+| pre-optimisation baseline (recorded, idle, fresh clone) | 425.8 | 1.00x |
+| **after the k-means change** | **324.8** | **1.31x faster** |
+| CPU baseline (recorded) | 863.6 | 2.66x slower than the new MPS number |
+
+**Per-stage attribution (instrumented run of the same workload, median of 1, all stages summed):**
+
+| stage | seconds | share |
+|---|---|---|
+| PLAS spatial sort | 291.47 | 85.9% |
+| k-means fit + full-data assignment | 42.88 | 12.6% |
+| image encode (9 files, avif) | 4.82 | 1.4% |
+| quantise / byte-split / reindex / reshaping | 0.13 | 0.04% |
+| **total (encode only, excludes the 5.2 s PLY load)** | **339.4** | |
+
+GPU utilisation (machine-wide `ioreg`, 5 Hz) during the 512² instrumented run, bucketed per stage by
+its own time window:
+
+```
+  kmeans                 mean= 99.7%   (n=1 timed region)   <- the k-means matmuls saturate the GPU
+  PLAS sort              mean= 84.6%   (n=1)                 <- the sort keeps the GPU busy
+  io_write               mean= 26.7%   max= 94.0% (n=5)      <- the AVIF encoders are CPU-only
+  whole run              mean= 88.2%   (n=213 samples)
+```
+
+**Regression check on the container the full-size run produced** (`full_container_check.py`, decodes
+with `--device mps` and compares order-independently against the 630 MB input PLY, same budgets as
+A1):
+
+```
+group                        worst vs input       budget  verdict
+f_dc_                              0.082205     0.141267  PASS
+f_rest_                              0.0127 0.05 (mean/range)  PASS
+opacity                            0.039440     0.047544  PASS
+rot_                               0.034564     0.192934  PASS
+scale_                             0.269486     1.286793  PASS
+x                                  0.002864  n/a (float)  PASS
+y                                  0.001131  n/a (float)  PASS
+z                                  0.004839  n/a (float)  PASS
+groups checked: 8; failures: []
+FULL CONTAINER OK
+```
+
+(the x/y/z, scale, opacity and f_rest numbers reproduce the Stage-3 record to the digit, so the k-means
+change did not move the full-size codec.)
+
+**`ffsplat eval` on that container** (real Tanks&Temples COLMAP set, 32 test images):
+
+```
+PSNR: 24.295, SSIM: 0.8461, LPIPS: 0.184 Time: 0.045s/image Number of GS: 2540836 Size: 31.446MB
+real 21.87
+```
+
+Metrics are **identical** to the Stage-2/3 record (24.295 / 0.8461 / 0.184). Note precisely what is and
+is not attributable to the B2.3 change: this dataset is COLMAP, and `datasets/dataset.py:25-27` sets
+`white_background = True` only for blender datasets, so `backgrounds` was already `None` here and the
+fix does not alter this run's numbers — it is the 0.106 -> 0.045 s/image difference that is *not*
+attributable to the fix (that earlier number was taken on a loaded machine). What the fix does change is
+the white-background path, and that is measured directly on the render call: 2.018 s -> 0.045 s
+(44.8x), with the composite verified equal to the rasterizer's own blend to 1.55e-06. An end-to-end
+`ffsplat eval` with `white_background=True` needs a blender-type dataset, which is **not** among the
+fixtures — recorded as a gap.
+
+**Environment-knob control** (512² scene, MPS, same command twice):
+
+```
+default                                     real 51.41
+PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 ...    real 52.00
+```
+
+1.1% apart, i.e. noise: the watermark ratios are a robustness knob, not a speed knob, and are not set.
+
+## B4. Where MPS is NOT optimised, with numbers
+
+1. **PLAS spatial sort — 291.5 s of a 324.8 s full-size encode (86%).** It is already on the *faster*
+   device (2.2x faster than CPU at the 1594² real grid, B2.1), so this is not a device-selection
+   problem: it is upstream `plas`'s per-iteration `l2_dist(...).item()` host sync
+   (`plas/core.py:91-92`, 5398 of the encode's 5469 host syncs, B2.5) followed by a burst of tiny
+   kernels. Fixing it means patching a PyPI wheel (does not survive a clean clone) or a Metal kernel
+   for the sort. **Not fixed.**
+2. **manhattan k-means (SOG-PlayCanvas profile only) — the one stage where the GPU is slower than the
+   CPU.** One full assignment pass at the real PlayCanvas shape (N=262144, K=65536, D=45):
+   MPS 47.98 s vs CPU 38.24 s (1.26x slower) after the B2.2 change (before it: 56.83 s vs 118.19 s).
+   L1 has no matmul identity, so the score matrix must be materialised by subtraction; MPS reaches
+   roughly a quarter of its memory bandwidth on that pattern. A fused L1+argmin Metal kernel would be
+   needed. Consequence, measured end-to-end on the 512² scene (see the file-level record): the
+   SOG-PlayCanvas encode is the only profile that is **slower** on MPS than on CPU. It still runs on
+   the GPU, because that is the port's device policy and the alternative (moving one stage to the CPU)
+   would add two host transfers per k-means iteration for a 1.26x local win.
+3. **Image encoding (AVIF/PNG/WEBP) — 4.8 s of the full-size encode (1.4%), CPU by construction.** There
+   is no GPU AVIF/PNG encoder in this stack: `cv2.imwrite` and Pillow (+ `pillow_heif`) are host code,
+   and the field must be on the host (`field_data.cpu().numpy()`) to reach them. Measured GPU
+   utilisation during those stages: 26.7% mean (i.e. the GPU is idle while the encoders run). The only
+   lever is the container's own `chroma`/`quality` parameters, which change the output.
+4. **PLY I/O and `container_meta.yaml` writing — CPU, by construction** (blocks the 0.13 s "other" bucket
+   plus the 5.2 s PLY parse on the full scene; both are file/parse work with no GPU equivalent).
+5. **SH degree > 4** is the one argument-level fallback left in the call chain: mpsplat evaluates SH on
+   the pure-torch path when `K > 25` (`vendor/mpsplat/gsplat/cuda/_wrapper.py:374-387`). It is now
+   announced by `ffsplat.device.warn_if_not_metal` and pinned by
+   `tests/test_metal_path.py::test_sh_degree_above_four_is_announced`. Fixing it means a Metal SH kernel
+   for degree 5+, which mpsplat does not have (not in scope, vendor is frozen).
